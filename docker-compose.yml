@@ -1,0 +1,34 @@
+# Порт шлюза публикуется ТОЛЬКО на 127.0.0.1. Наружу — через HTTPS reverse proxy (deploy/Caddyfile).
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rugw
+      POSTGRES_USER: rugw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rugw -d rugw"]
+      interval: 5s
+      retries: 20
+
+  gateway:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RUGW_DATABASE_URL: postgresql+asyncpg://rugw:${POSTGRES_PASSWORD}@postgres:5432/rugw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  pgdata:

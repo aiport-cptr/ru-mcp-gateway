@@ -1,0 +1,18 @@
+# /etc/caddy/Caddyfile — замените домен. Caddy сам получит сертификат Let's Encrypt.
+mcp.your-company.ru {
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        -Server
+    }
+
+    # Логи без заголовков Authorization и cookies
+    log {
+        output file /var/log/caddy/rugw.log
+        format filter {
+            request>headers>Authorization delete
+            request>headers>Cookie delete
+        }
+    }
+}

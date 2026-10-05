@@ -1,0 +1,136 @@
+"""Конфигурация шлюза.
+
+Принцип: fail-closed. Если конфигурация небезопасна, процесс не стартует.
+Режима «авторизация выключена» нет вообще — ни флагом, ни переменной.
+"""
+
+from __future__ import annotations
+
+from functools import cached_property
+from urllib.parse import urlparse
+
+from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PLACEHOLDER_MARKERS = ("change-me", "changeme", "example.com", "example.ru", "<", ">")
+ROLES = ("admin", "member", "readonly")
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="RUGW_", env_file=".env", extra="ignore")
+
+    # --- Публичные адреса ---
+    public_url: str = Field(description="Внешний адрес шлюза, например https://mcp.company.ru")
+
+    # --- Режим разработки: разрешает http только для localhost ---
+    dev_mode: bool = False
+
+    # --- База ---
+    database_url: str = Field(description="postgresql+asyncpg://... или sqlite+aiosqlite:///... (только dev)")
+
+    # --- Вход через Яндекс ---
+    yandex_client_id: str
+    yandex_client_secret: SecretStr
+    yandex_oauth_base: str = "https://oauth.yandex.ru"
+    yandex_login_base: str = "https://login.yandex.ru"
+
+    # --- Кого пускать ---
+    # Через запятую: домены почты (company.ru) и/или точные адреса.
+    allowed_email_domains: str = ""
+    allowed_emails: str = ""
+    # Адреса, которые при первом входе получают роль admin.
+    bootstrap_admin_emails: str = ""
+    # Роль для новых пользователей из разрешённых доменов.
+    default_role: str = "readonly"
+
+    # --- Время жизни ---
+    access_token_ttl_seconds: int = 3600
+    refresh_token_ttl_seconds: int = 30 * 24 * 3600
+    auth_code_ttl_seconds: int = 300
+    pending_login_ttl_seconds: int = 600
+
+    # --- Коннекторы (сервисные учётные данные, MVP) ---
+    tracker_token: SecretStr | None = None
+    tracker_org_id: str | None = None
+    tracker_org_kind: str = "360"  # "360" -> X-Org-ID, "cloud" -> X-Cloud-Org-ID
+    tracker_api_base: str = "https://api.tracker.yandex.net/v3"
+
+    bitrix24_webhook_url: SecretStr | None = None
+
+    onec_odata_url: str | None = None
+    onec_username: str | None = None
+    onec_password: SecretStr | None = None
+
+    # --- Аудит ---
+    audit_max_arg_chars: int = 2000
+
+    # ------------------------------------------------------------------ validators
+
+    @field_validator("default_role")
+    @classmethod
+    def _role_known(cls, v: str) -> str:
+        if v not in ROLES:
+            raise ValueError(f"default_role должен быть одним из {ROLES}")
+        if v == "admin":
+            raise ValueError("default_role=admin запрещён: админы назначаются явно")
+        return v
+
+    @model_validator(mode="after")
+    def _fail_closed(self) -> Settings:
+        url = urlparse(self.public_url)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            raise ValueError("public_url должен быть полным URL")
+        if url.path not in ("", "/"):
+            raise ValueError("public_url не должен содержать путь")
+        local = url.hostname in ("localhost", "127.0.0.1", "::1")
+        if url.scheme != "https" and not (self.dev_mode and local):
+            raise ValueError("public_url должен быть https (http допустим только при dev_mode и localhost)")
+        if self.dev_mode and not local:
+            raise ValueError("dev_mode разрешён только для localhost")
+        if not self.dev_mode:
+            for marker in PLACEHOLDER_MARKERS:
+                if marker in self.public_url:
+                    raise ValueError("public_url похож на заглушку из примера")
+            if self.database_url.startswith("sqlite"):
+                raise ValueError("SQLite допустим только в dev_mode")
+        secret = self.yandex_client_secret.get_secret_value()
+        if not secret or any(m in secret.lower() for m in PLACEHOLDER_MARKERS):
+            raise ValueError("yandex_client_secret не задан или похож на заглушку")
+        if not (self.allowed_domains or self.allowed_email_set or self.bootstrap_admins):
+            raise ValueError("Не задан ни один разрешённый домен или адрес — войти будет некому")
+        return self
+
+    # ------------------------------------------------------------------ helpers
+
+    @property
+    def issuer_url(self) -> str:
+        return self.public_url.rstrip("/")
+
+    @property
+    def resource_url(self) -> str:
+        return f"{self.issuer_url}/mcp"
+
+    @property
+    def yandex_callback_url(self) -> str:
+        return f"{self.issuer_url}/auth/yandex/callback"
+
+    @property
+    def public_host(self) -> str:
+        u = urlparse(self.public_url)
+        return u.netloc
+
+    @staticmethod
+    def _csv(value: str) -> frozenset[str]:
+        return frozenset(x.strip().lower() for x in value.split(",") if x.strip())
+
+    @cached_property
+    def allowed_domains(self) -> frozenset[str]:
+        return self._csv(self.allowed_email_domains)
+
+    @cached_property
+    def allowed_email_set(self) -> frozenset[str]:
+        return self._csv(self.allowed_emails)
+
+    @cached_property
+    def bootstrap_admins(self) -> frozenset[str]:
+        return self._csv(self.bootstrap_admin_emails)

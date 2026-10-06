@@ -6,7 +6,8 @@
   python -m rugw users list
   python -m rugw users set-role <email> <admin|member|readonly>
   python -m rugw users disable <email> | enable <email>
-  python -m rugw audit list   [--since 24h] [--user email] [--event tool_call] [--outcome denied] [--limit 50]
+  python -m rugw audit list   [--since 24h] [--user email] [--event tool_call] [--outcome denied]
+                              [--request rq-…] [--limit 50]
   python -m rugw audit export [--since 30d] [--format jsonl|csv] [--output файл]
   python -m rugw grants list [--subject role:member|user:email]
   python -m rugw grants add <subject> <connector> <resource> <read|write>
@@ -41,7 +42,18 @@ from rugw.maintenance import cleanup
 from rugw.migrate import current_revision, head_revision, upgrade
 
 DURATION = re.compile(r"^(\d+)([mhd])$")
-AUDIT_FIELDS = ("id", "time", "user", "client_id", "event", "target", "outcome", "duration_ms", "detail")
+AUDIT_FIELDS = (
+    "id",
+    "time",
+    "user",
+    "request_id",
+    "client_id",
+    "event",
+    "target",
+    "outcome",
+    "duration_ms",
+    "detail",
+)
 
 
 def parse_since(value: str | None) -> float | None:
@@ -107,6 +119,8 @@ async def iter_audit(db: Database, args: argparse.Namespace, limit: int | None) 
         q = q.where(AuditEvent.event == args.event)
     if getattr(args, "outcome", None):
         q = q.where(AuditEvent.outcome == args.outcome)
+    if getattr(args, "request", None):
+        q = q.where(AuditEvent.request_id == args.request)
     # list — свежие сверху; export — по порядку времени
     q = q.order_by(AuditEvent.id.desc() if limit else AuditEvent.id)
     if limit:
@@ -118,6 +132,7 @@ async def iter_audit(db: Database, args: argparse.Namespace, limit: int | None) 
                 "id": ev.id,
                 "time": dt.datetime.fromtimestamp(ev.ts, dt.UTC).isoformat(timespec="seconds"),
                 "user": email,
+                "request_id": ev.request_id,
                 "client_id": ev.client_id,
                 "event": ev.event,
                 "target": ev.target,
@@ -129,11 +144,13 @@ async def iter_audit(db: Database, args: argparse.Namespace, limit: int | None) 
 
 async def _audit(db: Database, args: argparse.Namespace, out: TextIO) -> int:
     if args.action == "list":
+        if args.since is None and not args.request:
+            args.since = parse_since("24h")
         async for row in iter_audit(db, args, limit=max(1, args.limit)):
             detail = (row["detail"] or "")[:80]
             print(
                 f"{row['time']}  {row['outcome']:<6} {row['event']:<16} {row['target'] or '-':<28} "
-                f"{row['user'] or '-'}  {detail}",
+                f"{row['request_id'] or '-':<15} {row['user'] or '-'}  {detail}",
                 file=out,
             )
         return 0
@@ -260,6 +277,14 @@ def load_settings() -> Settings | None:
         return None
 
 
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # httpx на уровне INFO пишет полный URL каждого запроса, а в URL бывают секреты
+    # (адрес вебхука Битрикс24, ключ Контур.Фокуса). Оставляем только предупреждения.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rugw")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -289,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
     gl.add_argument("--subject", help="role:member или user:ivan@company.ru")
     ga = gr_sub.add_parser("add")
     ga.add_argument("subject", help="role:readonly | role:member | user:<email>")
-    ga.add_argument("connector", help="tracker | bitrix24 | onec | *")
+    ga.add_argument("connector", help="tracker | bitrix24 | onec | amocrm | moysklad | focus | wildberries | ozon | *")
     ga.add_argument("resource", help="очередь Трекера, deal:<воронка>/lead/contact/company, набор 1С; * — шаблон")
     ga.add_argument("level", choices=["read", "write"])
     gr_sub.add_parser("remove").add_argument("id", type=int)
@@ -302,10 +327,12 @@ def build_parser() -> argparse.ArgumentParser:
     au_sub = au.add_subparsers(dest="action", required=True)
     for name in ("list", "export"):
         a = au_sub.add_parser(name)
-        a.add_argument("--since", type=parse_since, default=parse_since("24h") if name == "list" else None)
+        # list: по умолчанию сутки, но при поиске по номеру запроса — без ограничения по времени
+        a.add_argument("--since", type=parse_since, default=None)
         a.add_argument("--user")
         a.add_argument("--event")
         a.add_argument("--outcome", choices=["ok", "denied", "error"])
+        a.add_argument("--request", help="номер запроса rq-… из сообщения об ошибке")
         if name == "list":
             a.add_argument("--limit", type=int, default=50)
         else:
@@ -316,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    configure_logging()
     settings = load_settings()
     if settings is None:
         return 2

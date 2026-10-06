@@ -144,6 +144,7 @@ class AuditEvent(Base):
     outcome: Mapped[str] = mapped_column(String(16))  # ok | denied | error
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class _Transaction:

@@ -18,6 +18,7 @@ import httpx
 from rugw.access import AccessDenied, current_permissions
 from rugw.config import Settings
 from rugw.connectors.base import call_json, clip, safe_code
+from rugw.errors import ErrorCode
 from rugw.policy import Level
 from rugw.tools import ConnectorError, ToolSpec
 
@@ -47,7 +48,7 @@ def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) 
         if isinstance(data, dict) and data.get("error"):
             # error_description — произвольный текст портала, наружу не отдаём; только код.
             code = safe_code(data.get("error")) or "UNKNOWN"
-            raise ConnectorError(f"Битрикс24: ошибка, код {code}")
+            raise ConnectorError(f"Битрикс24: ошибка, код {code}", ErrorCode.UPSTREAM_ERROR)
         return data.get("result") if isinstance(data, dict) else data
 
     def entity(name: str) -> str:

@@ -17,7 +17,7 @@ from rugw.config import ROLES
 from rugw.db import Database, ResourceGrant
 from rugw.policy import Level, role_allows
 
-CONNECTORS = ("tracker", "bitrix24", "onec")
+CONNECTORS = ("tracker", "bitrix24", "onec", "amocrm", "moysklad", "focus", "wildberries", "ozon")
 GRANT_LEVELS = (Level.READ, Level.WRITE)
 _RANK = {Level.READ: 1, Level.WRITE: 2}
 
@@ -27,7 +27,7 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class AccessDenied(Exception):  # noqa: N818 — так понятнее в коде коннекторов
-    """Нет права на ресурс. Текст уходит модели и в аудит: без секретов."""
+    """Нет права на ресурс (код ACCESS_DENIED). Текст уходит модели и в аудит: без секретов."""
 
 
 def normalize_subject(subject: str) -> str:

@@ -23,6 +23,7 @@ class Auditor:
         target: str | None = None,
         detail: str | None = None,
         duration_ms: int | None = None,
+        request_id: str | None = None,
     ) -> None:
         try:
             async with self.db.session() as s:
@@ -35,6 +36,7 @@ class Auditor:
                         target=target,
                         detail=detail,
                         duration_ms=duration_ms,
+                        request_id=request_id,
                     )
                 )
         except Exception:  # noqa: BLE001 — аудит не должен ломать запрос, но падение видно в логах

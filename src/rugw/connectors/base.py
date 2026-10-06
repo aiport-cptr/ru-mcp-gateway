@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from rugw.errors import ErrorCode, current_request_id
 from rugw.tools import ConnectorError
 
 log = logging.getLogger(__name__)
@@ -56,17 +57,37 @@ def _error_code(r: httpx.Response) -> str | None:
     return None
 
 
+def _status_code(status: int) -> ErrorCode:
+    if status in (401, 403):
+        return ErrorCode.UPSTREAM_AUTH
+    if status == 404:
+        return ErrorCode.UPSTREAM_NOT_FOUND
+    if status == 429:
+        return ErrorCode.UPSTREAM_RATE_LIMIT
+    if 400 <= status < 500:
+        return ErrorCode.UPSTREAM_BAD_REQUEST
+    return ErrorCode.UPSTREAM_ERROR
+
+
 def upstream_error(system: str, r: httpx.Response, hint: str = "") -> ConnectorError:
     parts = [f"{system}: ошибка HTTP {r.status_code}"]
     code = _error_code(r)
     if code:
-        parts.append(f"код {code}")
+        parts.append(f"код системы {code}")
     rid = _request_id(r)
     if rid:
-        parts.append(f"id запроса {rid}")
-    log.warning("upstream error system=%s status=%s code=%s request_id=%s", system, r.status_code, code, rid)
-    log.debug("upstream error body system=%s: %.300s", system, r.text)
-    return ConnectorError(", ".join(parts) + (f" — {hint}" if hint else ""))
+        parts.append(f"id запроса в системе {rid}")
+    gw = current_request_id()
+    log.warning(
+        "upstream error request_id=%s system=%s status=%s code=%s upstream_request_id=%s",
+        gw,
+        system,
+        r.status_code,
+        code,
+        rid,
+    )
+    log.debug("upstream error body request_id=%s system=%s: %.300s", gw, system, r.text)
+    return ConnectorError(", ".join(parts) + (f" — {hint}" if hint else ""), _status_code(r.status_code))
 
 
 async def call_json(
@@ -80,9 +101,9 @@ async def call_json(
     try:
         r = await http.request(method, url, timeout=30, **kwargs)
     except httpx.TimeoutException as exc:
-        raise ConnectorError(f"{system}: превышено время ожидания") from exc
+        raise ConnectorError(f"{system}: превышено время ожидания", ErrorCode.UPSTREAM_TIMEOUT) from exc
     except httpx.HTTPError as exc:
-        raise ConnectorError(f"{system}: сеть недоступна") from exc
+        raise ConnectorError(f"{system}: сеть недоступна", ErrorCode.UPSTREAM_UNAVAILABLE) from exc
     if r.status_code in (401, 403):
         raise upstream_error(system, r, "нет доступа, проверьте учётные данные коннектора")
     if r.status_code == 404:
@@ -93,10 +114,12 @@ async def call_json(
         raise upstream_error(system, r, "проверьте параметры запроса")
     if r.status_code >= 500:
         raise upstream_error(system, r, "сбой на стороне внешней системы")
+    if r.status_code == 204 or not r.content:
+        return None  # например, amoCRM отвечает 204 на пустой список
     try:
         return r.json()
     except ValueError as exc:
-        raise ConnectorError(f"{system}: ответ не в формате JSON") from exc
+        raise ConnectorError(f"{system}: ответ не в формате JSON", ErrorCode.UPSTREAM_BAD_RESPONSE) from exc
 
 
 def clip(data: Any) -> str:

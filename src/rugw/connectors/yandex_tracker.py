@@ -21,6 +21,7 @@ from rugw.access import AccessDenied, current_permissions
 from rugw.config import Settings
 from rugw.connectors.base import call_json, clip
 from rugw.credentials import CredentialsUnavailable, YandexCredentials
+from rugw.errors import ErrorCode
 from rugw.policy import Level
 from rugw.tools import ConnectorError, ToolSpec
 
@@ -49,6 +50,26 @@ def queue_of(issue: Any) -> str | None:
     return None
 
 
+HIDDEN = {"hidden": "задача из очереди, недоступной вам в шлюзе"}
+
+
+def hide_foreign_issues(value: Any, perms, depth: int = 0) -> Any:
+    """Заменить вложенные ссылки на задачи (parent, epic, …) из недоступных очередей заглушкой.
+
+    Верхний уровень — сама задача, её доступ уже проверен. Ссылка на задачу — словарь с полем
+    key вида QUEUE-123; её очередь — из поля queue, если есть, иначе из ключа.
+    """
+    if isinstance(value, list):
+        return [hide_foreign_issues(v, perms, depth + 1) for v in value]
+    if not isinstance(value, dict):
+        return value
+    if depth > 0 and isinstance(value.get("key"), str) and ISSUE_KEY.match(value["key"]):
+        queue = queue_of(value)
+        if queue is None or not perms.allows(CONNECTOR, queue, Level.READ):
+            return dict(HIDDEN)
+    return {k: hide_foreign_issues(v, perms, depth + 1) for k, v in value.items()}
+
+
 def build(settings: Settings, http: httpx.AsyncClient, credentials: YandexCredentials | None = None) -> list[ToolSpec]:
     user_mode = settings.tracker_auth_mode == "user"
     if not settings.tracker_org_id:
@@ -64,12 +85,13 @@ def build(settings: Settings, http: httpx.AsyncClient, credentials: YandexCreden
         if user_mode:
             user_id = current_permissions().user_id
             if user_id is None:
-                raise ConnectorError("Трекер: не определён пользователь")
+                raise ConnectorError("Трекер: не определён пользователь", ErrorCode.INTERNAL)
             try:
                 token = await credentials.access_token(user_id)
             except CredentialsUnavailable as exc:
                 raise ConnectorError(
-                    f"Трекер: {exc} — переподключите шлюз в клиенте (войдите через Яндекс заново)"
+                    f"Трекер: {exc} — переподключите шлюз в клиенте (войдите через Яндекс заново)",
+                    ErrorCode.RELOGIN_REQUIRED,
                 ) from exc
         else:
             token = settings.tracker_token.get_secret_value()
@@ -123,8 +145,9 @@ def build(settings: Settings, http: httpx.AsyncClient, credentials: YandexCreden
         return clip(result)
 
     async def tracker_get_issue(key: str) -> str:
-        """Полная карточка задачи по ключу QUEUE-123."""
-        return clip(await get_issue_checked(key, Level.READ))
+        """Полная карточка задачи по ключу QUEUE-123. Связанные задачи из недоступных вам очередей скрыты."""
+        issue = await get_issue_checked(key, Level.READ)
+        return clip(hide_foreign_issues(issue, current_permissions()))
 
     async def tracker_get_comments(key: str) -> str:
         """Комментарии к задаче."""

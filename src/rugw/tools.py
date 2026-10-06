@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -24,8 +25,11 @@ from rugw.access import AccessDenied, Permissions, load_permissions, reset_curre
 from rugw.audit import Auditor
 from rugw.config import Settings
 from rugw.db import Database, User
+from rugw.errors import ErrorCode, new_request_id, reset_request_id, set_request_id, tag
 from rugw.policy import Level, role_allows
 from rugw.security import audit_dump
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,7 +50,11 @@ class Actor:
 
 
 class ConnectorError(Exception):
-    """Ожидаемая ошибка внешней системы. Текст уходит модели, поэтому без секретов."""
+    """Ожидаемая ошибка коннектора. Текст уходит модели и в аудит, поэтому без секретов."""
+
+    def __init__(self, message: str, code: ErrorCode = ErrorCode.BAD_INPUT) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class GatewayServer(MCPServer):
@@ -92,9 +100,10 @@ def register(server: GatewayServer, spec: ToolSpec, settings: Settings, auditor:
 
     @functools.wraps(fn)
     async def guarded(**kwargs: Any) -> Any:
+        rid = new_request_id()
         actor = await current_actor(server._db)
         if actor is None:
-            raise ToolError("Нет авторизации")
+            raise ToolError(tag("Нет авторизации", ErrorCode.ACCESS_DENIED, rid))
         args_text = audit_dump(kwargs, settings.audit_max_arg_chars)
         perms = await load_permissions(server._db, actor.email, actor.role, actor.user_id)
 
@@ -107,28 +116,33 @@ def register(server: GatewayServer, spec: ToolSpec, settings: Settings, auditor:
                 target=spec.name,
                 detail=detail,
                 duration_ms=duration_ms,
+                request_id=rid,
             )
 
         if not tool_visible(perms, spec):
-            await audit("denied", args_text)
+            await audit("denied", f"{args_text} | {ErrorCode.ACCESS_DENIED}")
             what = f"коннектору {spec.connector}" if spec.connector else "инструменту"
-            raise ToolError(f"Нет доступа уровня {spec.level.value} к {what} (роль «{actor.role}»)")
+            msg = f"Нет доступа уровня {spec.level.value} к {what} (роль «{actor.role}»)"
+            raise ToolError(tag(msg, ErrorCode.ACCESS_DENIED, rid))
 
         t0 = time.monotonic()
         outcome, detail = "ok", args_text
-        ctx = set_current(perms)
+        ctx, rctx = set_current(perms), set_request_id(rid)
         try:
             return await fn(**kwargs)
         except AccessDenied as exc:
-            outcome, detail = "denied", f"{args_text} | {exc}"
-            raise ToolError(str(exc)) from exc
+            outcome, detail = "denied", f"{args_text} | {ErrorCode.ACCESS_DENIED} | {exc}"
+            raise ToolError(tag(str(exc), ErrorCode.ACCESS_DENIED, rid)) from exc
         except ConnectorError as exc:
-            outcome, detail = "error", f"{args_text} | {exc}"
-            raise ToolError(str(exc)) from exc
+            outcome, detail = "error", f"{args_text} | {exc.code} | {exc}"
+            raise ToolError(tag(str(exc), exc.code, rid)) from exc
         except Exception as exc:
-            outcome, detail = "error", f"{args_text} | {type(exc).__name__}"
-            raise
+            # Неожиданная ошибка: подробности — только в лог сервера (по номеру запроса), модели — код.
+            log.exception("tool %s failed, request_id=%s", spec.name, rid)
+            outcome, detail = "error", f"{args_text} | {ErrorCode.INTERNAL} | {type(exc).__name__}"
+            raise ToolError(tag("Внутренняя ошибка шлюза", ErrorCode.INTERNAL, rid)) from exc
         finally:
+            reset_request_id(rctx)
             reset_current(ctx)
             await audit(outcome, detail, int((time.monotonic() - t0) * 1000))
 

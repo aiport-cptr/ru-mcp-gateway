@@ -15,7 +15,7 @@
 - **Секреты коннекторов** остаются на сервере и не попадают ни к модели, ни к клиенту.
 - **Авторизацию нельзя выключить.** Небезопасная конфигурация не даёт процессу стартовать.
 
-Статус: **0.3**, не прошёл внешний аудит безопасности. Не подключайте рабочие
+Статус: **0.4**, не прошёл внешний аудит безопасности. Не подключайте рабочие
 системы с правами на запись, пока не прочитаны [SECURITY.md](SECURITY.md) и не проведена проверка.
 
 ## Коннекторы
@@ -28,6 +28,12 @@
 | Битрикс24 (CRM) | `bitrix_crm_list`, `bitrix_crm_get` | read |
 | | `bitrix_crm_add_comment` | write |
 | 1С (OData) | `onec_list_entities`, `onec_query` | read |
+| amoCRM | `amocrm_leads_list`, `amocrm_lead_get`, `amocrm_contacts_list` | read |
+| | `amocrm_add_note` | write |
+| МойСклад | `moysklad_list`, `moysklad_stock` | read |
+| Контур.Фокус | `focus_lookup` | read |
+| Wildberries | `wb_stocks`, `wb_orders`, `wb_sales` | read |
+| Ozon | `ozon_products`, `ozon_stocks`, `ozon_fbs_postings` | read |
 
 Коннектор включается, только если в `.env` заданы его учётные данные.
 Пользователь видит в списке только инструменты, разрешённые его роли и правам на ресурсы.
@@ -111,9 +117,25 @@ rugw grants add user:cfo@company.ru onec 'Document_*' read
 ```
 
 Ресурсы: Трекер — ключ очереди; Битрикс24 — `deal:<id воронки>`, `lead`, `contact`, `company`;
-1С — имя набора OData. `*` — любая последовательность символов. Роль — потолок: `readonly`
+1С — имя набора OData; amoCRM — `lead:<id воронки>`, `contact`, `company`; МойСклад — тип сущности
+и `stock`; Контур.Фокус — метод API; Wildberries — `stocks`/`orders`/`sales`; Ozon —
+`products`/`stocks`/`postings`. Подробно — [docs/design/0.4-connectors.md](docs/design/0.4-connectors.md). `*` — любая последовательность символов. Роль — потолок: `readonly`
 не пишет даже с правом `write`. Админ видит всё. Изменения действуют сразу.
 Подробно — [docs/design/0.3-access.md](docs/design/0.3-access.md).
+
+## Если что-то не работает
+
+Ошибка инструмента заканчивается кодом и номером запроса, например
+`[код UPSTREAM_AUTH, запрос rq-3f9a1c0b7e21]`. По номеру администратор находит вызов:
+
+```bash
+rugw audit list --request rq-3f9a1c0b7e21
+```
+
+`UPSTREAM_AUTH` — проверьте токен коннектора; `UPSTREAM_RATE_LIMIT` — лимит внешней системы
+(у Wildberries — 1 запрос в минуту); `RELOGIN_REQUIRED` — сотруднику нужно переподключить шлюз;
+`INTERNAL` — подробности в логе сервера по тому же номеру. Все коды — в
+[docs/design/0.4-connectors.md](docs/design/0.4-connectors.md).
 
 ## Трекер от имени сотрудника
 

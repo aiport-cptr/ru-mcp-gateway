@@ -60,6 +60,27 @@ class Settings(BaseSettings):
     # service — общий токен tracker_token; user — токен Яндекса каждого сотрудника (docs/design/0.3-access.md)
     tracker_auth_mode: Literal["service", "user"] = "service"
 
+    # amoCRM: адрес аккаунта и долгосрочный токен (Настройки → Интеграции → своя интеграция)
+    amocrm_base_url: str | None = None  # https://company.amocrm.ru
+    amocrm_token: SecretStr | None = None
+
+    # МойСклад: токен (Настройки → Токены), лучше от отдельного пользователя только на чтение
+    moysklad_token: SecretStr | None = None
+    moysklad_api_base: str = "https://api.moysklad.ru/api/remap/1.2"
+
+    # Контур.Фокус: ключ API
+    focus_key: SecretStr | None = None
+    focus_api_base: str = "https://focus-api.kontur.ru/api3"
+
+    # Wildberries: токен категории «Статистика» (только чтение)
+    wildberries_token: SecretStr | None = None
+    wildberries_statistics_base: str = "https://statistics-api.wildberries.ru"
+
+    # Ozon Seller: Client-Id и Api-Key (роль ключа — только чтение)
+    ozon_client_id: str | None = None
+    ozon_api_key: SecretStr | None = None
+    ozon_api_base: str = "https://api-seller.ozon.ru"
+
     # --- Доступ от имени пользователя ---
     # Дополнительные права Яндекса, запрашиваемые при входе, например "tracker:read tracker:write".
     yandex_extra_scopes: str = ""
@@ -124,6 +145,26 @@ class Settings(BaseSettings):
             except (ValueError, TypeError) as exc:
                 raise ValueError("token_encryption_keys: каждый ключ должен быть ключом Fernet") from exc
         return v
+
+    @field_validator("amocrm_base_url")
+    @classmethod
+    def _amocrm_url(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        u = urlparse(v)
+        host = u.hostname or ""
+        if u.scheme != "https" or u.path not in ("", "/") or u.query or u.username:
+            raise ValueError("amocrm_base_url: https://<поддомен>.amocrm.ru без пути и параметров")
+        if not host.endswith((".amocrm.ru", ".amocrm.com", ".kommo.com")):
+            raise ValueError("amocrm_base_url: домен должен быть *.amocrm.ru, *.amocrm.com или *.kommo.com")
+        return f"https://{host}"
+
+    @field_validator("ozon_client_id")
+    @classmethod
+    def _ozon_client(cls, v: str | None) -> str | None:
+        if v and not re.fullmatch(r"\d{1,20}", v.strip()):
+            raise ValueError("ozon_client_id: только цифры")
+        return v.strip() if v else None
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod

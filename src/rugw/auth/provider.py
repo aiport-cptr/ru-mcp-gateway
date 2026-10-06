@@ -102,9 +102,16 @@ class GatewayOAuthProvider:
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> GatewayAuthCode | None:
+        code_hash = hash_secret(authorization_code)
         async with self.db.session() as s:
-            row = await s.get(AuthCode, hash_secret(authorization_code))
-            if row is None or row.client_id != client.client_id or row.used or row.expires_at < time.time():
+            row = await s.get(AuthCode, code_hash)
+            if row is None or row.client_id != client.client_id:
+                return None
+            if row.used:
+                # Повтор уже обменянного кода: гасим всё, что по нему выдано (RFC 6749 §4.1.2).
+                await self._revoke_by_code(s, code_hash)
+                return None
+            if row.expires_at < time.time():
                 return None
             p = row.params_json
             return GatewayAuthCode(
@@ -123,26 +130,41 @@ class GatewayOAuthProvider:
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: GatewayAuthCode
     ) -> OAuthToken:
+        # Ошибки OAuth выбрасываем только после выхода из транзакции: так отзыв при повторе
+        # фиксируется, а не откатывается вместе с исключением.
+        code_hash = hash_secret(authorization_code.code)
+        error: TokenError | None = None
+        token: OAuthToken | None = None
         async with self.db.session() as s:
-            # Атомарно помечаем код использованным: повторный обмен не пройдёт.
+            # Атомарно помечаем код использованным: из двух одновременных обменов пройдёт один.
             res = await s.execute(
                 update(AuthCode)
-                .where(AuthCode.code_hash == hash_secret(authorization_code.code), AuthCode.used.is_(False))
+                .where(
+                    AuthCode.code_hash == code_hash,
+                    AuthCode.client_id == client.client_id,
+                    AuthCode.used.is_(False),
+                )
                 .values(used=True)
             )
             if res.rowcount != 1:
-                raise TokenError("invalid_grant", "Код уже использован")
-            if not await self._user_active(s, authorization_code.user_id):
-                raise TokenError("invalid_grant", "Пользователь заблокирован")
-            grant = Grant(
-                client_id=client.client_id,
-                user_id=authorization_code.user_id,
-                scopes=[GATEWAY_SCOPE],
-                resource=authorization_code.resource,
-            )
-            s.add(grant)
-            await s.flush()
-            return self._mint(s, grant.id)
+                await self._revoke_by_code(s, code_hash)
+                error = TokenError("invalid_grant", "Код уже использован")
+            elif not await self._user_active(s, authorization_code.user_id):
+                error = TokenError("invalid_grant", "Пользователь заблокирован")
+            else:
+                grant = Grant(
+                    client_id=client.client_id,
+                    user_id=authorization_code.user_id,
+                    scopes=[GATEWAY_SCOPE],
+                    resource=authorization_code.resource,
+                    auth_code_hash=code_hash,
+                )
+                s.add(grant)
+                await s.flush()
+                token = self._mint(s, grant.id)
+        if error is not None:
+            raise error
+        return token
 
     # ------------------------------------------------------------ refresh
 
@@ -177,22 +199,40 @@ class GatewayOAuthProvider:
     ) -> OAuthToken:
         if scopes and not set(scopes) <= {GATEWAY_SCOPE}:
             raise TokenError("invalid_scope", "Неизвестный scope")
+        error: TokenError | None = None
+        token: OAuthToken | None = None
         async with self.db.session() as s:
-            res = await s.execute(
-                update(Token)
-                .where(Token.token_hash == hash_secret(refresh_token.token), Token.used.is_(False))
-                .values(used=True)
-            )
-            if res.rowcount != 1:
-                raise TokenError("invalid_grant", "Refresh-токен уже использован")
             grant = await s.get(Grant, refresh_token.grant_id)
-            if grant is None or grant.revoked or not await self._user_active(s, grant.user_id):
-                raise TokenError("invalid_grant", "Доступ отозван")
-            # Старые access-токены гранта больше не нужны.
-            await s.execute(
-                update(Token).where(Token.grant_id == grant.id, Token.kind == "access").values(expires_at=0)
-            )
-            return self._mint(s, grant.id)
+            if grant is None or grant.client_id != client.client_id:
+                error = TokenError("invalid_grant", "Refresh-токен не принадлежит клиенту")
+            else:
+                res = await s.execute(
+                    update(Token)
+                    .where(
+                        Token.token_hash == hash_secret(refresh_token.token),
+                        Token.grant_id == grant.id,
+                        Token.kind == "refresh",
+                        Token.used.is_(False),
+                    )
+                    .values(used=True)
+                )
+                if res.rowcount != 1:
+                    # Токен уже обменян (в том числе параллельным запросом) — вероятна кража:
+                    # отзываем весь грант вместе с только что выданными токенами.
+                    grant.revoked = True
+                    error = TokenError("invalid_grant", "Refresh-токен уже использован")
+                elif grant.revoked or not await self._user_active(s, grant.user_id):
+                    error = TokenError("invalid_grant", "Доступ отозван")
+                else:
+                    # Старые access-токены гранта больше не нужны.
+                    await s.execute(
+                        update(Token).where(Token.grant_id == grant.id, Token.kind == "access").values(expires_at=0)
+                    )
+                    token = self._mint(s, grant.id)
+        # Выход из транзакции зафиксировал отзыв; теперь можно сообщить об ошибке.
+        if error is not None:
+            raise error
+        return token
 
     # ------------------------------------------------------------ access
 
@@ -249,6 +289,10 @@ class GatewayOAuthProvider:
             refresh_token=refresh,
             scope=GATEWAY_SCOPE,
         )
+
+    @staticmethod
+    async def _revoke_by_code(s, code_hash: str) -> None:
+        await s.execute(update(Grant).where(Grant.auth_code_hash == code_hash).values(revoked=True))
 
     @staticmethod
     async def _user_active(s, user_id: int) -> bool:

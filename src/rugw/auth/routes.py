@@ -111,9 +111,9 @@ class AuthRoutes:
                 if user.disabled:
                     await self.audit.log(event="login_denied", outcome="denied", target=ident.email, user_id=user.id)
                     return _error("Учётная запись заблокирована.", 403)
+                # Роль существующего пользователя не трогаем: bootstrap_admin_emails действует
+                # только при первом входе, дальше роль меняют лишь через `rugw users set-role`.
                 user.email, user.login = ident.email, ident.login
-                if role == "admin":  # bootstrap-список может только повысить, не понизить
-                    user.role = "admin"
             user.last_login_at = time.time()
             await s.flush()
             csrf = new_secret()

@@ -1,15 +1,72 @@
-"""Общее для коннекторов: HTTP-вызов с понятными ошибками и ограничение объёма ответа."""
+"""Общее для коннекторов: HTTP-вызов с понятными ошибками и ограничение объёма ответа.
+
+Тексты ошибок внешних систем в ответ модели и в аудит НЕ попадают: тело ответа
+может содержать секреты, персональные данные или диагностику. Наружу уходят только
+система, HTTP-статус, безопасный код ошибки и идентификатор запроса — по ним
+администратор найдёт подробности в журнале внешней системы.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any
 
 import httpx
 
 from rugw.tools import ConnectorError
 
+log = logging.getLogger(__name__)
+
 MAX_RESPONSE_CHARS = 60_000  # не заливаем в контекст модели мегабайты
+
+# Код ошибки (NOT_FOUND, ACCESS_DENIED, -1…) и идентификатор запроса пропускаем, только если
+# они выглядят как короткие идентификаторы — без пробелов, разметки и произвольного текста.
+_SAFE_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_REQUEST_ID_HEADERS = ("x-request-id", "x-req-id", "x-trace-id", "x-correlation-id")
+
+
+def safe_code(value: Any) -> str | None:
+    return value if isinstance(value, str) and _SAFE_CODE.match(value) else None
+
+
+def _request_id(r: httpx.Response) -> str | None:
+    for h in _REQUEST_ID_HEADERS:
+        rid = safe_code(r.headers.get(h))
+        if rid:
+            return rid
+    return None
+
+
+def _error_code(r: httpx.Response) -> str | None:
+    """Короткий код ошибки из JSON-тела (Битрикс24: error; OData: odata.error.code / error.code)."""
+    try:
+        data = r.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for candidate in (data.get("error"), data.get("code"), data.get("odata.error")):
+        if isinstance(candidate, dict):
+            candidate = candidate.get("code")
+        code = safe_code(candidate)
+        if code:
+            return code
+    return None
+
+
+def upstream_error(system: str, r: httpx.Response, hint: str = "") -> ConnectorError:
+    parts = [f"{system}: ошибка HTTP {r.status_code}"]
+    code = _error_code(r)
+    if code:
+        parts.append(f"код {code}")
+    rid = _request_id(r)
+    if rid:
+        parts.append(f"id запроса {rid}")
+    log.warning("upstream error system=%s status=%s code=%s request_id=%s", system, r.status_code, code, rid)
+    log.debug("upstream error body system=%s: %.300s", system, r.text)
+    return ConnectorError(", ".join(parts) + (f" — {hint}" if hint else ""))
 
 
 async def call_json(
@@ -27,14 +84,15 @@ async def call_json(
     except httpx.HTTPError as exc:
         raise ConnectorError(f"{system}: сеть недоступна") from exc
     if r.status_code in (401, 403):
-        raise ConnectorError(f"{system}: нет доступа (HTTP {r.status_code}) — проверьте учётные данные коннектора")
+        raise upstream_error(system, r, "нет доступа, проверьте учётные данные коннектора")
     if r.status_code == 404:
-        raise ConnectorError(f"{system}: не найдено")
+        raise upstream_error(system, r, "не найдено")
     if r.status_code == 429:
-        raise ConnectorError(f"{system}: превышен лимит запросов, попробуйте позже")
-    if r.status_code >= 400:
-        # Тело ошибки может содержать полезное описание, но обрезаем его.
-        raise ConnectorError(f"{system}: ошибка HTTP {r.status_code}: {r.text[:300]}")
+        raise upstream_error(system, r, "превышен лимит запросов, попробуйте позже")
+    if 400 <= r.status_code < 500:
+        raise upstream_error(system, r, "проверьте параметры запроса")
+    if r.status_code >= 500:
+        raise upstream_error(system, r, "сбой на стороне внешней системы")
     try:
         return r.json()
     except ValueError as exc:

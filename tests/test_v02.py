@@ -40,31 +40,14 @@ async def test_migrations_build_schema_matching_models(tmp_path):
 async def test_v01_database_is_adopted(tmp_path):
     """База, созданная версией 0.1 (create_all, без alembic_version), обновляется без потери данных."""
     db = Database(db_url(tmp_path, "old"))
-    v01 = sa.MetaData()
-    sa.Table(
-        "users",
-        v01,
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("yandex_id", sa.String(64), unique=True),
-        sa.Column("login", sa.String(255)),
-        sa.Column("email", sa.String(320)),
-        sa.Column("role", sa.String(16)),
-        sa.Column("disabled", sa.Boolean),
-        sa.Column("created_at", sa.Float),
-        sa.Column("last_login_at", sa.Float),
-    )
-    # Остальные таблицы 0.1 — как в модели (без новых индексов это не влияет на тест данных).
-    for name in ("oauth_clients", "pending_logins", "auth_codes", "grants", "tokens", "audit_events"):
-        Base.metadata.tables[name].to_metadata(v01)
-    for t in v01.tables.values():
-        for ix in list(t.indexes):
-            if ix.name and ix.name.endswith("_expires_at"):
-                t.indexes.discard(ix)
+    # Точная схема 0.1 = миграция 0001; убираем отметку Alembic, как было у create_all.
+    await upgrade(db, "0001")
     async with db.engine.begin() as conn:
-        await conn.run_sync(v01.create_all)
+        await conn.execute(sa.text("DROP TABLE alembic_version"))
         await conn.execute(
             sa.text("INSERT INTO users VALUES (1,'y1','old','old@company.ru','admin',false,0,0)"),
         )
+    assert await current_revision(db) is None
     await upgrade(db)
     assert await current_revision(db) == head_revision()
     async with db.session() as s:

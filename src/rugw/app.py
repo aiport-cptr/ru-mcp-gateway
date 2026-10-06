@@ -123,4 +123,7 @@ def build_app(
     app.router.lifespan_context = lifespan
     app.state.db = db
     app.state.settings = settings
+    app.state.provider = provider
+    app.state.server = server
+    app.state.auditor = auditor
     return app

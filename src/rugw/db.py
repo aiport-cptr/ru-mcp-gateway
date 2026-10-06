@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
 from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -86,6 +84,8 @@ class Grant(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     scopes: Mapped[list] = mapped_column(JSON)
     resource: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Хеш кода авторизации, по которому выдан грант: повтор кода отзывает грант (RFC 6749 §4.1.2).
+    auth_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[float] = mapped_column(Float, default=now)
 
@@ -115,16 +115,46 @@ class AuditEvent(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class _Transaction:
+    """Асинхронный контекст-менеджер на классе, а не на генераторе.
+
+    contextlib.asynccontextmanager при пробросе исключения присваивает ему __traceback__,
+    а исключения OAuth из MCP SDK (TokenError и др.) — frozen dataclass: присваивание
+    падает с FrozenInstanceError и подменяет исходную ошибку. Здесь исключение
+    пробрасывается как есть.
+    """
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+        self._session: AsyncSession | None = None
+
+    async def __aenter__(self) -> AsyncSession:
+        self._session = self._factory()
+        await self._session.begin()
+        return self._session
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        s = self._session
+        if s is None:  # __aexit__ без __aenter__ — ошибка программиста
+            raise RuntimeError("транзакция не была открыта")
+        try:
+            if exc_type is None:
+                await s.commit()
+            else:
+                await s.rollback()
+        finally:
+            await s.close()
+        return False  # исключение пробрасывается без изменений
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
 
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
-        async with self._sessions() as s:
-            async with s.begin():
-                yield s
+    def session(self) -> _Transaction:
+        """Сессия в транзакции: commit при нормальном выходе, rollback при исключении."""
+        return _Transaction(self._sessions)
 
     async def dispose(self) -> None:
         await self.engine.dispose()

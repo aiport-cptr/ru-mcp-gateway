@@ -8,6 +8,10 @@
   python -m rugw users disable <email> | enable <email>
   python -m rugw audit list   [--since 24h] [--user email] [--event tool_call] [--outcome denied] [--limit 50]
   python -m rugw audit export [--since 30d] [--format jsonl|csv] [--output файл]
+  python -m rugw grants list [--subject role:member|user:email]
+  python -m rugw grants add <subject> <connector> <resource> <read|write>
+  python -m rugw grants remove <id>
+  python -m rugw credentials rotate
 
 Управление — только из консоли сервера: у админки нет сетевой поверхности атаки.
 """
@@ -26,10 +30,13 @@ import time
 from collections.abc import AsyncIterator
 from typing import TextIO
 
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
+from rugw.access import normalize_subject, validate_grant
 from rugw.config import ROLES, Settings
-from rugw.db import AuditEvent, Database, Grant, User
+from rugw.db import AuditEvent, Database, Grant, ResourceGrant, User, UserCredential
 from rugw.maintenance import cleanup
 from rugw.migrate import current_revision, head_revision, upgrade
 
@@ -79,9 +86,10 @@ async def _users(db: Database, args: argparse.Namespace) -> int:
             user.role = args.role
         elif args.action in ("disable", "enable"):
             user.disabled = args.action == "disable"
-            if user.disabled:  # сразу гасим все выданные доступы
+            if user.disabled:  # сразу гасим все выданные доступы и сохранённые токены Яндекса
                 for g in (await s.execute(select(Grant).where(Grant.user_id == user.id))).scalars():
                     g.revoked = True
+                await s.execute(delete(UserCredential).where(UserCredential.user_id == user.id))
         print(f"OK: {user.email} → role={user.role} disabled={user.disabled}")
         return 0
 
@@ -140,6 +148,68 @@ async def _audit(db: Database, args: argparse.Namespace, out: TextIO) -> int:
     return 0
 
 
+# ------------------------------------------------------------------ grants
+
+
+async def _grants(db: Database, args: argparse.Namespace, out: TextIO) -> int:
+    if args.action == "list":
+        q = select(ResourceGrant).order_by(ResourceGrant.subject, ResourceGrant.connector, ResourceGrant.resource)
+        if args.subject:
+            try:
+                q = q.where(ResourceGrant.subject == normalize_subject(args.subject))
+            except ValueError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+        async with db.session() as s:
+            for g in (await s.execute(q)).scalars():
+                print(f"{g.id}\t{g.subject}\t{g.connector}\t{g.resource}\t{g.level}", file=out)
+        return 0
+    if args.action == "add":
+        try:
+            subject, connector, resource, level = validate_grant(
+                args.subject, args.connector, args.resource, args.level
+            )
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        try:
+            async with db.session() as s:
+                row = ResourceGrant(subject=subject, connector=connector, resource=resource, level=level)
+                s.add(row)
+                await s.flush()
+                gid = row.id
+        except IntegrityError:
+            print(
+                "Такое право уже есть (subject + connector + resource). Удалите старое, чтобы сменить уровень.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"OK: #{gid} {subject} {connector} {resource} {level}", file=out)
+        return 0
+    if args.action == "remove":
+        async with db.session() as s:
+            row = await s.get(ResourceGrant, args.id)
+            if row is None:
+                print("Право не найдено", file=sys.stderr)
+                return 1
+            desc = f"{row.subject} {row.connector} {row.resource} {row.level}"
+            await s.delete(row)
+        print(f"OK: удалено #{args.id} {desc}", file=out)
+        return 0
+    raise AssertionError(args.action)
+
+
+async def _credentials(db: Database, settings: Settings, args: argparse.Namespace, out: TextIO) -> int:
+    from rugw.credentials import TokenCipher, rotate_all
+
+    if settings.token_encryption_keys is None:
+        print("RUGW_TOKEN_ENCRYPTION_KEYS не задан", file=sys.stderr)
+        return 2
+    n = await rotate_all(db, TokenCipher(settings.token_encryption_keys))
+    print(f"OK: перешифровано {n} записей первым ключом; старые ключи можно убрать из настроек", file=out)
+    return 0
+
+
 # ------------------------------------------------------------------ main
 
 
@@ -162,9 +232,32 @@ async def _run(settings: Settings, args: argparse.Namespace, out: TextIO) -> int
             return await _users(db, args)
         if args.cmd == "audit":
             return await _audit(db, args, out)
+        if args.cmd == "grants":
+            return await _grants(db, args, out)
+        if args.cmd == "credentials":
+            return await _credentials(db, settings, args, out)
         raise AssertionError(args.cmd)
     finally:
         await db.dispose()
+
+
+def config_errors(exc: ValidationError) -> list[str]:
+    """Тексты ошибок конфигурации без введённых значений: в них могут быть секреты."""
+    lines = []
+    for err in exc.errors(include_input=False, include_url=False, include_context=False):
+        field = ".".join(str(x) for x in err.get("loc", ())) or "настройки"
+        lines.append(f"  {field}: {err.get('msg', 'ошибка')}")
+    return lines
+
+
+def load_settings() -> Settings | None:
+    try:
+        return Settings()
+    except ValidationError as exc:
+        print("Конфигурация небезопасна или неполна, шлюз не запущен:", file=sys.stderr)
+        for line in config_errors(exc):
+            print(line, file=sys.stderr)
+        return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -190,6 +283,21 @@ def build_parser() -> argparse.ArgumentParser:
     for a in ("disable", "enable"):
         us_sub.add_parser(a).add_argument("email")
 
+    gr = sub.add_parser("grants", help="права на ресурсы коннекторов (docs/design/0.3-access.md)")
+    gr_sub = gr.add_subparsers(dest="action", required=True)
+    gl = gr_sub.add_parser("list")
+    gl.add_argument("--subject", help="role:member или user:ivan@company.ru")
+    ga = gr_sub.add_parser("add")
+    ga.add_argument("subject", help="role:readonly | role:member | user:<email>")
+    ga.add_argument("connector", help="tracker | bitrix24 | onec | *")
+    ga.add_argument("resource", help="очередь Трекера, deal:<воронка>/lead/contact/company, набор 1С; * — шаблон")
+    ga.add_argument("level", choices=["read", "write"])
+    gr_sub.add_parser("remove").add_argument("id", type=int)
+
+    cr = sub.add_parser("credentials", help="сохранённые токены Яндекса сотрудников")
+    cr_sub = cr.add_subparsers(dest="action", required=True)
+    cr_sub.add_parser("rotate", help="перешифровать все токены первым ключом из RUGW_TOKEN_ENCRYPTION_KEYS")
+
     au = sub.add_parser("audit", help="журнал аудита")
     au_sub = au.add_subparsers(dest="action", required=True)
     for name in ("list", "export"):
@@ -209,7 +317,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    settings = Settings()  # падает с понятной ошибкой, если конфигурация небезопасна
+    settings = load_settings()
+    if settings is None:
+        return 2
 
     if args.cmd != "serve":
         if getattr(args, "output", None):

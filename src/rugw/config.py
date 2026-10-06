@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from functools import cached_property
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -55,6 +57,15 @@ class Settings(BaseSettings):
     tracker_org_id: str | None = None
     tracker_org_kind: str = "360"  # "360" -> X-Org-ID, "cloud" -> X-Cloud-Org-ID
     tracker_api_base: str = "https://api.tracker.yandex.net/v3"
+    # service — общий токен tracker_token; user — токен Яндекса каждого сотрудника (docs/design/0.3-access.md)
+    tracker_auth_mode: Literal["service", "user"] = "service"
+
+    # --- Доступ от имени пользователя ---
+    # Дополнительные права Яндекса, запрашиваемые при входе, например "tracker:read tracker:write".
+    yandex_extra_scopes: str = ""
+    # Ключи Fernet через запятую: первый шифрует, любой расшифровывает (ротация).
+    # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    token_encryption_keys: SecretStr | None = None
 
     bitrix24_webhook_url: SecretStr | None = None
 
@@ -90,6 +101,30 @@ class Settings(BaseSettings):
             raise ValueError("default_role=admin запрещён: админы назначаются явно")
         return v
 
+    @field_validator("yandex_extra_scopes")
+    @classmethod
+    def _scopes_valid(cls, v: str) -> str:
+        for scope in v.split():
+            if not re.fullmatch(r"[a-z0-9_]+:[a-z0-9_]+", scope):
+                raise ValueError(f"Некорректное право Яндекса: {scope!r} (ожидается вида tracker:read)")
+            if scope in ("login:email", "login:info"):
+                raise ValueError(f"{scope} запрашивается всегда, указывать не нужно")
+        return v
+
+    @field_validator("token_encryption_keys")
+    @classmethod
+    def _keys_valid(cls, v: SecretStr | None) -> SecretStr | None:
+        if v is None or not v.get_secret_value().strip():
+            return None
+        from cryptography.fernet import Fernet
+
+        for key in v.get_secret_value().split(","):
+            try:
+                Fernet(key.strip())
+            except (ValueError, TypeError) as exc:
+                raise ValueError("token_encryption_keys: каждый ключ должен быть ключом Fernet") from exc
+        return v
+
     @field_validator("trusted_proxy_cidrs")
     @classmethod
     def _cidrs_valid(cls, v: str) -> str:
@@ -119,6 +154,13 @@ class Settings(BaseSettings):
         secret = self.yandex_client_secret.get_secret_value()
         if not secret or any(m in secret.lower() for m in PLACEHOLDER_MARKERS):
             raise ValueError("yandex_client_secret не задан или похож на заглушку")
+        if self.tracker_auth_mode == "user":
+            if self.token_encryption_keys is None:
+                raise ValueError("tracker_auth_mode=user требует token_encryption_keys")
+            if not set(self.yandex_extra_scopes.split()) & {"tracker:read", "tracker:write"}:
+                raise ValueError("tracker_auth_mode=user требует tracker:read или tracker:write в yandex_extra_scopes")
+            if not self.tracker_org_id:
+                raise ValueError("tracker_auth_mode=user требует tracker_org_id")
         if not (self.allowed_domains or self.allowed_email_set or self.bootstrap_admins):
             raise ValueError("Не задан ни один разрешённый домен или адрес — войти будет некому")
         return self

@@ -15,16 +15,18 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from rugw import __version__
+from rugw.access import current_permissions
 from rugw.audit import Auditor
 from rugw.auth.provider import GATEWAY_SCOPE, GatewayOAuthProvider
 from rugw.auth.routes import AuthRoutes
 from rugw.auth.yandex import YandexOAuth
 from rugw.config import Settings
 from rugw.connectors import build_all
+from rugw.credentials import build_credentials
 from rugw.db import Database
 from rugw.maintenance import cleanup_loop
 from rugw.migrate import current_revision, head_revision
-from rugw.policy import Level
+from rugw.policy import Level, role_allows
 from rugw.ratelimit import RateLimitMiddleware
 from rugw.tools import GatewayServer, ToolSpec, current_actor, register
 
@@ -47,7 +49,8 @@ def build_app(
     auditor = Auditor(db)
     yandex = YandexOAuth(settings, http)
     provider = GatewayOAuthProvider(settings, db, yandex)
-    routes = AuthRoutes(settings, db, yandex, provider, auditor)
+    credentials = build_credentials(settings, db, yandex)
+    routes = AuthRoutes(settings, db, yandex, provider, auditor, credentials)
 
     server = GatewayServer(
         name="ru-mcp-gateway",
@@ -69,14 +72,25 @@ def build_app(
 
     # ---- инструменты самого шлюза
     async def gateway_whoami() -> dict:
-        """Кто я в шлюзе: email и роль."""
+        """Кто я в шлюзе: email, роль и к каким ресурсам коннекторов у меня есть доступ."""
         actor = await current_actor(db)
-        return {"email": actor.email, "role": actor.role} if actor else {}
+        if actor is None:
+            return {}
+        perms = current_permissions()
+        if perms.is_admin:
+            access: object = "все ресурсы всех коннекторов"
+        else:
+            access = [
+                {"connector": r.connector, "resource": r.resource, "level": r.level.value}
+                for r in perms.rules
+                if role_allows(actor.role, r.level)  # право выше потолка роли не показываем как доступное
+            ]
+        return {"email": actor.email, "role": actor.role, "access": access}
 
     register(server, ToolSpec("gateway_whoami", Level.READ, gateway_whoami, gateway_whoami.__doc__), settings, auditor)
 
     # ---- коннекторы
-    specs = build_all(settings, http) + list(extra_tools or [])
+    specs = build_all(settings, http, credentials) + list(extra_tools or [])
     for spec in specs:
         register(server, spec, settings, auditor)
     log.info("connectors: %d tools enabled: %s", len(specs), ", ".join(s.name for s in specs) or "—")
@@ -126,4 +140,5 @@ def build_app(
     app.state.provider = provider
     app.state.server = server
     app.state.auditor = auditor
+    app.state.credentials = credentials
     return app

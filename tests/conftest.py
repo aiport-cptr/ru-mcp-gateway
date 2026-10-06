@@ -87,10 +87,13 @@ def make_settings(tmp_path, **over) -> Settings:
 class Harness:
     """Гоняет приложение в процессе и подменяет Яндекс через respx."""
 
+    refreshes: list[str] = []  # refresh-токены Яндекса, по которым шлюз обновлял доступ
+
     def __init__(self, app, client: httpx.AsyncClient, yandex_users: dict[str, dict]):
         self.app = app
         self.c = client
         self.yandex_users = yandex_users  # код Яндекса -> профиль
+        self.ycodes: dict[str, str] = {}
 
     async def register_client(self, name: str = "Test Client") -> str:
         r = await self.c.post(
@@ -130,6 +133,7 @@ class Harness:
     async def yandex_return(self, ystate: str, email: str) -> httpx.Response:
         ycode = secrets.token_hex(8)
         self.yandex_users[ycode] = {"id": str(abs(hash(email))), "login": email.split("@")[0], "default_email": email}
+        self.ycodes[email] = ycode  # токен Яндекса этого входа: ya-<ycode>
         return await self.c.get("/auth/yandex/callback", params={"state": ystate, "code": ycode})
 
     async def login(self, email: str, client_id: str | None = None) -> dict:
@@ -215,17 +219,33 @@ def anyio_backend():
 
 
 @pytest.fixture
-async def harness(tmp_path):
-    settings = make_settings(tmp_path)
+def harness_settings() -> dict:
+    """Переопределите в модуле тестов, чтобы включить коннекторы и т.п."""
+    return {}
+
+
+@pytest.fixture
+async def harness(tmp_path, harness_settings):
+    settings = make_settings(tmp_path, **harness_settings)
     yandex_users: dict[str, dict] = {}
     with respx.mock(assert_all_called=False) as mock:
 
         def token_route(request: httpx.Request):
             form = parse_qs(request.content.decode())
-            code = form["code"][0]
             assert form["client_secret"] == ["ysecret-real"]
+            if form["grant_type"] == ["refresh_token"]:
+                old = form["refresh_token"][0]  # yr-<код>[-n]
+                code = old.removeprefix("yr-").split("~")[0]
+                n = int(old.split("~")[1]) + 1 if "~" in old else 1
+                Harness.refreshes.append(old)
+                return httpx.Response(
+                    200, json={"access_token": f"ya-{code}~{n}", "refresh_token": f"yr-{code}~{n}", "expires_in": 3600}
+                )
+            code = form["code"][0]
             assert form.get("code_verifier"), "PKCE к Яндексу должен передаваться"
-            return httpx.Response(200, json={"access_token": f"ya-{code}"})
+            return httpx.Response(
+                200, json={"access_token": f"ya-{code}", "refresh_token": f"yr-{code}", "expires_in": 3600}
+            )
 
         def info_route(request: httpx.Request):
             code = request.headers["Authorization"].removeprefix("OAuth ya-")
@@ -240,4 +260,34 @@ async def harness(tmp_path):
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url=BASE, follow_redirects=False) as c:
-                yield Harness(app, c, yandex_users)
+                h = Harness(app, c, yandex_users)
+                h.mock = mock
+                Harness.refreshes = []
+                yield h
+
+
+@pytest.fixture
+async def as_admin():
+    """Права admin для прямого вызова функций коннекторов (в обход guarded) в юнит-тестах."""
+    from rugw.access import Permissions, reset_current, set_current
+
+    token = set_current(Permissions(role="admin", rules=(), user_id=None))
+    yield
+    reset_current(token)
+
+
+@pytest.fixture
+async def as_user():
+    """Фабрика: выставить права произвольного пользователя для прямого вызова коннекторов."""
+    from rugw.access import Permissions, _Rule, reset_current, set_current
+    from rugw.policy import Level
+
+    tokens = []
+
+    def apply(role: str, *rules: tuple[str, str, str], user_id: int | None = None) -> None:
+        perms = Permissions(role=role, rules=tuple(_Rule(c, r, Level(lv)) for c, r, lv in rules), user_id=user_id)
+        tokens.append(set_current(perms))
+
+    yield apply
+    for t in reversed(tokens):
+        reset_current(t)

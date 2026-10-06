@@ -1,6 +1,6 @@
 [project]
 name = "rugw"
-version = "0.2.1"
+version = "0.3.0"
 description = "Корпоративный MCP-шлюз к российским бизнес-системам"
 readme = "README.md"
 license = "Apache-2.0"

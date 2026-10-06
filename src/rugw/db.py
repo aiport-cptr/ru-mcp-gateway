@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -99,6 +99,34 @@ class Token(Base):
     expires_at: Mapped[float] = mapped_column(Float, index=True)
     used: Mapped[bool] = mapped_column(Boolean, default=False)  # для refresh: уже обменян
     created_at: Mapped[float] = mapped_column(Float, default=now)
+
+
+class ResourceGrant(Base):
+    """Право на ресурс коннектора. Подробно: docs/design/0.3-access.md."""
+
+    __tablename__ = "resource_grants"
+    __table_args__ = (UniqueConstraint("subject", "connector", "resource", name="uq_resource_grant"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject: Mapped[str] = mapped_column(String(340), index=True)  # role:<роль> | user:<email>
+    connector: Mapped[str] = mapped_column(String(32))  # tracker | bitrix24 | onec | *
+    resource: Mapped[str] = mapped_column(String(255))  # шаблон с *
+    level: Mapped[str] = mapped_column(String(8))  # read | write
+    created_at: Mapped[float] = mapped_column(Float, default=now)
+
+
+class UserCredential(Base):
+    """Токены внешнего провайдера (Яндекс) пользователя. Хранятся только зашифрованными."""
+
+    __tablename__ = "user_credentials"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)  # yandex
+    access_token_enc: Mapped[str] = mapped_column(Text)
+    refresh_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scopes: Mapped[str] = mapped_column(String(512), default="")
+    updated_at: Mapped[float] = mapped_column(Float, default=now)
 
 
 class AuditEvent(Base):

@@ -12,7 +12,7 @@ from rugw.connectors import bitrix24, onec_odata, yandex_tracker
 from rugw.tools import ConnectorError
 from tests.conftest import make_settings
 
-pytestmark = pytest.mark.anyio
+pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures("as_admin")]
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ async def test_bitrix_list_and_entity_whitelist(tmp_path):
         t = _tools(bitrix24.build(s, http))
         with respx.mock:
             respx.post(f"{hook}/crm.deal.list.json").mock(
-                return_value=httpx.Response(200, json={"result": [{"ID": "7", "TITLE": "Сделка"}]})
+                return_value=httpx.Response(200, json={"result": [{"ID": "7", "TITLE": "Сделка", "CATEGORY_ID": "0"}]})
             )
             out = await t["bitrix_crm_list"].fn(entity_type="deal")
         assert "Сделка" in out

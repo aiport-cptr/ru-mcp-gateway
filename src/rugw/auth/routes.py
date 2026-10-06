@@ -21,6 +21,7 @@ from rugw.audit import Auditor
 from rugw.auth.provider import GatewayOAuthProvider
 from rugw.auth.yandex import YandexAuthError, YandexOAuth
 from rugw.config import Settings
+from rugw.credentials import YandexCredentials
 from rugw.db import Database, PendingLogin, User
 from rugw.policy import admission_role
 from rugw.security import hash_secret, new_secret, same
@@ -62,12 +63,14 @@ class AuthRoutes:
         yandex: YandexOAuth,
         provider: GatewayOAuthProvider,
         auditor: Auditor,
+        credentials: YandexCredentials | None = None,
     ) -> None:
         self.s = settings
         self.db = db
         self.yandex = yandex
         self.provider = provider
         self.audit = auditor
+        self.credentials = credentials
 
     async def _load_pending(self, state: str) -> PendingLogin | None:
         async with self.db.session() as s:
@@ -90,7 +93,7 @@ class AuthRoutes:
             return _error("Ссылка входа устарела. Начните подключение заново из клиента.")
 
         try:
-            ident = await self.yandex.identify(code, pending.params_json["_yandex_verifier"])
+            ident, ytokens = await self.yandex.identify(code, pending.params_json["_yandex_verifier"])
         except YandexAuthError as exc:
             log.warning("yandex auth failed: %s", exc)
             return _error(str(exc), 502)
@@ -123,6 +126,11 @@ class AuthRoutes:
                 .values(user_id=user.id, consent_csrf_hash=hash_secret(csrf))
             )
             user_id, email = user.id, user.email
+
+        if self.credentials is not None:
+            # Режим «от имени пользователя»: сохраняем токен Яндекса (зашифрованным).
+            await self.credentials.save(user_id, ytokens)
+        del ytokens
 
         await self.audit.log(event="login_ok", outcome="ok", user_id=user_id, client_id=pending.client_id)
 

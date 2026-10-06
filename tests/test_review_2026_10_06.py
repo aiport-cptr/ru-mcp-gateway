@@ -113,7 +113,7 @@ def anyio_backend():
     return "asyncio"
 
 
-async def test_upstream_error_body_not_exposed_tracker(tmp_path):
+async def test_upstream_error_body_not_exposed_tracker(tmp_path, as_admin):
     s = make_settings(tmp_path, tracker_token="t", tracker_org_id="1")
     async with httpx.AsyncClient() as http:
         tools = {t.name: t for t in yandex_tracker.build(s, http)}
@@ -128,7 +128,7 @@ async def test_upstream_error_body_not_exposed_tracker(tmp_path):
     assert "500" in msg and "req-123" in msg
 
 
-async def test_upstream_error_request_id_is_sanitized(tmp_path):
+async def test_upstream_error_request_id_is_sanitized(tmp_path, as_admin):
     s = make_settings(tmp_path, tracker_token="t", tracker_org_id="1")
     async with httpx.AsyncClient() as http:
         tools = {t.name: t for t in yandex_tracker.build(s, http)}
@@ -141,7 +141,7 @@ async def test_upstream_error_request_id_is_sanitized(tmp_path):
     assert MARKER not in str(e.value) and "<b>" not in str(e.value)
 
 
-async def test_upstream_error_body_not_exposed_onec(tmp_path):
+async def test_upstream_error_body_not_exposed_onec(tmp_path, as_admin):
     base = "https://1c.corp.ru/base/odata/standard.odata"
     s = make_settings(tmp_path, onec_odata_url=base, onec_username="u", onec_password="p")
     async with httpx.AsyncClient() as http:
@@ -153,7 +153,7 @@ async def test_upstream_error_body_not_exposed_onec(tmp_path):
     assert MARKER not in str(e.value)
 
 
-async def test_bitrix_error_description_not_exposed(tmp_path):
+async def test_bitrix_error_description_not_exposed(tmp_path, as_admin):
     hook = "https://corp.bitrix24.ru/rest/1/hooksecret"
     s = make_settings(tmp_path, bitrix24_webhook_url=hook)
     async with httpx.AsyncClient() as http:

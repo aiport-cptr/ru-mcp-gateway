@@ -126,6 +126,9 @@ class UserCredential(Base):
     refresh_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     scopes: Mapped[str] = mapped_column(String(512), default="")
+    # Поколение записи: растёт при каждом сохранении. Обновление по refresh пишет результат,
+    # только если поколение не изменилось с момента чтения (CAS) — см. credentials.py.
+    generation: Mapped[int] = mapped_column(Integer, default=1, server_default="0")
     updated_at: Mapped[float] = mapped_column(Float, default=now)
 
 

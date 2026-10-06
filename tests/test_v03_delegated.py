@@ -242,3 +242,128 @@ def test_config_error_output_has_no_secret_values(tmp_path):
     text = "\n".join(config_errors(exc.value))
     assert "token_encryption_keys" in text
     assert secret not in text
+
+
+# ------------------------------------------------------------------ гонки (проверка 0.3, находки 1–2)
+
+
+async def _expire_and_pause_refresh(harness, monkeypatch, store, access="old-refreshed"):
+    """Просрочить токен alice и подменить refresh Яндекса на управляемый. Возвращает (user_id, started, release)."""
+    import asyncio
+
+    from rugw.auth.yandex import YandexTokens
+
+    await harness.login("alice@company.ru")
+    async with harness.app.state.db.session() as s:
+        user = (await s.execute(select(User).where(User.email == "alice@company.ru"))).scalar_one()
+        await s.execute(update(UserCredential).values(expires_at=0))
+    started, release = asyncio.Event(), asyncio.Event()
+    calls: list[str] = []
+
+    async def refresh(token):
+        calls.append(token)
+        started.set()
+        await release.wait()
+        return YandexTokens(f"{access}-{len(calls)}", f"{access}-refresh-{len(calls)}", 3600)
+
+    monkeypatch.setattr(store.yandex, "refresh", refresh)
+    return user.id, started, release, calls
+
+
+async def test_refresh_caller_gets_new_login_token_after_conflict(harness, monkeypatch):
+    import asyncio
+
+    from rugw.auth.yandex import YandexTokens
+
+    store = harness.app.state.credentials
+    user_id, started, release, _ = await _expire_and_pause_refresh(harness, monkeypatch, store)
+    task = asyncio.create_task(store.access_token(user_id))
+    await started.wait()
+    assert await store.save(user_id, YandexTokens("new-login", "new-login-refresh", 3600)) is True
+    release.set()
+    # Вызов, начавший обновление, получает актуальный токен нового входа, а не устаревший результат.
+    assert await task == "new-login"
+
+
+async def test_refresh_after_delete_raises_and_does_not_recreate(harness, monkeypatch):
+    import asyncio
+
+    store = harness.app.state.credentials
+    user_id, started, release, _ = await _expire_and_pause_refresh(harness, monkeypatch, store)
+    task = asyncio.create_task(store.access_token(user_id))
+    await started.wait()
+    await store.delete(user_id)
+    release.set()
+    with pytest.raises(Exception, match="нет сохранённого доступа"):
+        await task
+    async with harness.app.state.db.session() as s:
+        assert await s.get(UserCredential, (user_id, "yandex")) is None
+
+
+async def test_two_processes_refreshing_keep_single_consistent_chain(harness, monkeypatch):
+    """Два экземпляра хранилища (как два процесса) — без общей asyncio-блокировки. Сохраняется ровно одна цепочка."""
+    import asyncio
+
+    from rugw.credentials import YandexCredentials
+
+    a = harness.app.state.credentials
+    b = YandexCredentials(a.db, a.cipher, a.yandex, a.scopes)  # отдельные блокировки
+    user_id, started, release, calls = await _expire_and_pause_refresh(harness, monkeypatch, a)
+    t1 = asyncio.create_task(a.access_token(user_id))
+    t2 = asyncio.create_task(b.access_token(user_id))
+    await started.wait()
+    await asyncio.sleep(0.05)
+    release.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+    assert len(calls) == 2  # оба процесса сходили в Яндекс
+    assert r1 == r2  # но оба используют один и тот же сохранённый результат
+    async with harness.app.state.db.session() as s:
+        row = await s.get(UserCredential, (user_id, "yandex"))
+    assert a.cipher.decrypt(row.access_token_enc) == r1
+
+
+async def test_save_refuses_disabled_user(harness):
+    from rugw.auth.yandex import YandexTokens
+
+    await harness.login("alice@company.ru")
+    db = harness.app.state.db
+    await _users(db, build_parser().parse_args(["users", "disable", "alice@company.ru"]))
+    async with db.session() as s:
+        user_id = (await s.execute(select(User.id).where(User.email == "alice@company.ru"))).scalar_one()
+    assert await harness.app.state.credentials.save(user_id, YandexTokens("x", "y", 3600)) is False
+    async with db.session() as s:
+        assert await s.get(UserCredential, (user_id, "yandex")) is None
+
+
+async def test_generation_increments(harness):
+    await harness.login("alice@company.ru")
+    first = await _cred(harness, "alice@company.ru")
+    await harness.login("alice@company.ru")
+    second = await _cred(harness, "alice@company.ru")
+    assert second.generation == first.generation + 1
+
+
+async def test_pg_login_save_waits_for_concurrent_disable(harness):
+    """PostgreSQL: save() ждёт незавершённую транзакцию блокировки (FOR UPDATE) и затем ничего не пишет."""
+    import asyncio
+
+    from rugw.auth.yandex import YandexTokens
+
+    db = harness.app.state.db
+    if db.engine.dialect.name != "postgresql":
+        pytest.skip("блокировки строк проверяются на PostgreSQL")
+    await harness.login("alice@company.ru")
+    async with db.session() as s:
+        user_id = (await s.execute(select(User.id).where(User.email == "alice@company.ru"))).scalar_one()
+
+    async with db.engine.connect() as conn:  # «другой процесс»: CLI users disable, ещё не зафиксирован
+        tx = await conn.begin()
+        await conn.execute(update(User).where(User.id == user_id).values(disabled=True))
+        await conn.execute(UserCredential.__table__.delete().where(UserCredential.user_id == user_id))
+        task = asyncio.create_task(harness.app.state.credentials.save(user_id, YandexTokens("late", "late-r", 3600)))
+        await asyncio.sleep(0.3)
+        assert not task.done(), "save должен ждать блокировку строки пользователя"
+        await tx.commit()
+    assert await task is False
+    async with db.session() as s:
+        assert await s.get(UserCredential, (user_id, "yandex")) is None

@@ -16,10 +16,31 @@ jobs:
       - run: uv sync --frozen
       - name: Lint
         run: uv run ruff check src tests && uv run ruff format --check src tests
-      - name: Tests
+      - name: Tests (SQLite)
         run: uv run pytest -q
       - name: Dependency audit
         run: uvx pip-audit --strict --progress-spinner off -r <(uv export --frozen --no-dev --no-hashes --no-emit-project)
+
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rugw
+          POSTGRES_PASSWORD: rugw
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rugw" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Tests (PostgreSQL)
+        env:
+          RUGW_TEST_PG_URL: postgresql+asyncpg://rugw:rugw@127.0.0.1:5432
+        run: uv run pytest -q
 
   docker:
     runs-on: ubuntu-latest

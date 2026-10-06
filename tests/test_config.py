@@ -19,7 +19,7 @@ def test_ok_dev(tmp_path):
         {"public_url": "http://mcp.company.ru", "dev_mode": False},  # http в проде
         {"public_url": "http://mcp.company.ru", "dev_mode": True},  # dev_mode не на localhost
         {"public_url": "https://mcp.example.com", "dev_mode": False, "database_url": "postgresql+asyncpg://x/y"},
-        {"public_url": "https://mcp.company.ru", "dev_mode": False},  # sqlite в проде
+        {"public_url": "https://mcp.company.ru", "dev_mode": False, "database_url": "sqlite+aiosqlite:///x.db"},
         {"public_url": "https://mcp.company.ru/sub"},
         {"yandex_client_secret": "change-me"},
         {"yandex_client_secret": ""},

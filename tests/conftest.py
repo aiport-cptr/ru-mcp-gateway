@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -13,6 +16,7 @@ import respx
 
 from rugw.app import build_app
 from rugw.config import Settings
+from rugw.migrate import upgrade
 from rugw.policy import Level
 from rugw.tools import ToolSpec
 
@@ -21,11 +25,55 @@ REDIRECT = "http://127.0.0.1:33418/callback"
 ACCEPT = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
 
+# Если задан RUGW_TEST_PG_URL (например postgresql+asyncpg://rugw@127.0.0.1:5432),
+# каждый тест получает отдельную чистую базу PostgreSQL; иначе — файл SQLite.
+PG_URL = os.environ.get("RUGW_TEST_PG_URL", "").rstrip("/")
+_created: set[str] = set()
+
+
+def _run_sync(coro) -> None:
+    """Выполнить корутину в отдельном потоке (тест может уже крутить свой event loop)."""
+    err: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001
+            err.append(exc)
+
+    th = threading.Thread(target=target)
+    th.start()
+    th.join()
+    if err:
+        raise err[0]
+
+
+def db_url(tmp_path, name: str = "t") -> str:
+    if not PG_URL:
+        return f"sqlite+aiosqlite:///{tmp_path}/{name}.db"
+    db_name = "t_" + hashlib.sha1(f"{tmp_path}/{name}".encode()).hexdigest()[:20]  # noqa: S324
+    if db_name not in _created:
+        import asyncpg
+
+        async def create() -> None:
+            conn = await asyncpg.connect(PG_URL.replace("+asyncpg", "") + "/postgres")
+            try:
+                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+                await conn.execute(f'CREATE DATABASE "{db_name}"')
+            finally:
+                await conn.close()
+
+        _run_sync(create())
+        _created.add(db_name)
+    return f"{PG_URL}/{db_name}"
+
+
 def make_settings(tmp_path, **over) -> Settings:
     env = dict(
+        rate_limit_enabled=False,  # лимиты проверяются отдельными тестами
         public_url=BASE,
         dev_mode=True,
-        database_url=f"sqlite+aiosqlite:///{tmp_path}/t.db",
+        database_url=db_url(tmp_path),
         yandex_client_id="yid",
         yandex_client_secret="ysecret-real",
         allowed_email_domains="company.ru",
@@ -188,6 +236,7 @@ async def harness(tmp_path):
 
         http = httpx.AsyncClient()
         app = build_app(settings, http=http, extra_tools=[ToolSpec("test_echo_write", Level.WRITE, echo_write, "echo")])
+        await upgrade(app.state.db)
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url=BASE, follow_redirects=False) as c:

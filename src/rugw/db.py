@@ -54,7 +54,7 @@ class PendingLogin(Base):
     state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     client_id: Mapped[str] = mapped_column(String(64))
     params_json: Mapped[dict] = mapped_column(JSON)
-    expires_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
     # Заполняются после возврата из Яндекса:
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     consent_csrf_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -68,7 +68,7 @@ class AuthCode(Base):
     client_id: Mapped[str] = mapped_column(String(64))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     params_json: Mapped[dict] = mapped_column(JSON)
-    expires_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
@@ -96,7 +96,7 @@ class Token(Base):
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     kind: Mapped[str] = mapped_column(String(8))  # access | refresh
     grant_id: Mapped[int] = mapped_column(ForeignKey("grants.id"), index=True)
-    expires_at: Mapped[float] = mapped_column(Float)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)
     used: Mapped[bool] = mapped_column(Boolean, default=False)  # для refresh: уже обменян
     created_at: Mapped[float] = mapped_column(Float, default=now)
 
@@ -119,10 +119,6 @@ class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
-
-    async def create_all(self) -> None:
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from functools import cached_property
 from urllib.parse import urlparse
 
@@ -63,6 +64,20 @@ class Settings(BaseSettings):
 
     # --- Аудит ---
     audit_max_arg_chars: int = 2000
+    # Сколько дней хранить журнал аудита; 0 — бессрочно.
+    audit_retention_days: int = Field(default=365, ge=0)
+
+    # --- Обслуживание ---
+    cleanup_interval_seconds: int = Field(default=3600, ge=60)
+
+    # --- Ограничение частоты запросов (в минуту) ---
+    rate_limit_enabled: bool = True
+    rate_register_per_minute: int = Field(default=10, ge=1)  # на IP
+    rate_auth_per_minute: int = Field(default=30, ge=1)  # /authorize, /token, /revoke, /auth/* на IP
+    rate_mcp_per_minute: int = Field(default=300, ge=1)  # /mcp на токен (или IP без токена)
+    # Прокси, которым верим в X-Forwarded-For (CIDR через запятую).
+    # По умолчанию: localhost и сеть Docker по умолчанию (Caddy на хосте → контейнер).
+    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128,172.16.0.0/12"
 
     # ------------------------------------------------------------------ validators
 
@@ -73,6 +88,14 @@ class Settings(BaseSettings):
             raise ValueError(f"default_role должен быть одним из {ROLES}")
         if v == "admin":
             raise ValueError("default_role=admin запрещён: админы назначаются явно")
+        return v
+
+    @field_validator("trusted_proxy_cidrs")
+    @classmethod
+    def _cidrs_valid(cls, v: str) -> str:
+        for part in v.split(","):
+            if part.strip():
+                ipaddress.ip_network(part.strip(), strict=False)  # ValueError при ошибке
         return v
 
     @model_validator(mode="after")
@@ -134,3 +157,9 @@ class Settings(BaseSettings):
     @cached_property
     def bootstrap_admins(self) -> frozenset[str]:
         return self._csv(self.bootstrap_admin_emails)
+
+    @cached_property
+    def trusted_proxies(self) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        return tuple(
+            ipaddress.ip_network(p.strip(), strict=False) for p in self.trusted_proxy_cidrs.split(",") if p.strip()
+        )

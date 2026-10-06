@@ -1,6 +1,6 @@
 [project]
 name = "rugw"
-version = "0.1.0"
+version = "0.2.0"
 description = "Корпоративный MCP-шлюз к российским бизнес-системам"
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,6 +10,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
+    "alembic>=1.20.0",
     "asyncpg>=0.31.0",
     "cryptography>=50.0.2",
     "httpx>=0.28.1",

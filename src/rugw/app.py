@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -21,7 +22,10 @@ from rugw.auth.yandex import YandexOAuth
 from rugw.config import Settings
 from rugw.connectors import build_all
 from rugw.db import Database
+from rugw.maintenance import cleanup_loop
+from rugw.migrate import current_revision, head_revision
 from rugw.policy import Level
+from rugw.ratelimit import RateLimitMiddleware
 from rugw.tools import GatewayServer, ToolSpec, current_actor, register
 
 log = logging.getLogger(__name__)
@@ -94,18 +98,29 @@ def build_app(
         ),
     )
 
+    if settings.rate_limit_enabled:
+        # Внешний слой: отсекаем поток запросов до проверки токенов и обращений к базе.
+        app.add_middleware(RateLimitMiddleware, settings=settings)
+
     inner_lifespan = app.router.lifespan_context
 
     @contextlib.asynccontextmanager
     async def lifespan(a: Starlette) -> AsyncIterator[None]:
-        await db.create_all()
+        current, head = await current_revision(db), head_revision()
+        if current != head:
+            raise RuntimeError(f"Схема базы {current or 'пустая'}, нужна {head}. Выполните: python -m rugw migrate")
+        cleaner = asyncio.create_task(cleanup_loop(db, settings), name="rugw-cleanup")
         async with inner_lifespan(a):
             try:
                 yield
             finally:
+                cleaner.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cleaner
                 await http.aclose()
                 await db.dispose()
 
     app.router.lifespan_context = lifespan
     app.state.db = db
+    app.state.settings = settings
     return app

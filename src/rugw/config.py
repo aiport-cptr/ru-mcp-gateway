@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PLACEHOLDER_MARKERS = ("change-me", "changeme", "example.com", "example.ru", "<", ">")
 ROLES = ("admin", "member", "readonly")
+YANDEX360_SCOPES = {"disk": "cloud_api:disk.read", "mail": "mail:imap_ro"}
 
 
 class Settings(BaseSettings):
@@ -81,6 +82,25 @@ class Settings(BaseSettings):
     ozon_api_key: SecretStr | None = None
     ozon_api_base: str = "https://api-seller.ozon.ru"
 
+    # Диадок: приложение из Кабинета интегратора Контура; вход — `rugw diadoc login` (нужны ключи шифрования)
+    diadoc_client_id: str | None = None
+    diadoc_client_secret: SecretStr | None = None
+    diadoc_scope: str = "openid offline_access Diadoc.PublicAPI"  # тестовая площадка: Diadoc.PublicAPI.Staging
+    diadoc_api_base: str = "https://diadoc-api.kontur.ru"
+    diadoc_identity_base: str = "https://identity.kontur.ru"
+
+    # СБИС (Saby): отдельный пользователь с правами только на просмотр документов
+    sbis_login: str | None = None
+    sbis_password: SecretStr | None = None
+    sbis_auth_url: str = "https://online.sbis.ru/auth/service/"
+    sbis_service_url: str = "https://online.sbis.ru/service/?srv=1"
+
+    # Яндекс 360 от имени сотрудника: через запятую disk, mail. Нужны ключи шифрования и права Яндекса:
+    # disk → cloud_api:disk.read, mail → mail:imap_ro (в RUGW_YANDEX_EXTRA_SCOPES и в OAuth-приложении)
+    yandex360_services: str = ""
+    yandex_disk_api_base: str = "https://cloud-api.yandex.net/v1/disk"
+    yandex_imap_host: str = "imap.yandex.ru"
+
     # --- Доступ от имени пользователя ---
     # Дополнительные права Яндекса, запрашиваемые при входе, например "tracker:read tracker:write".
     yandex_extra_scopes: str = ""
@@ -126,7 +146,7 @@ class Settings(BaseSettings):
     @classmethod
     def _scopes_valid(cls, v: str) -> str:
         for scope in v.split():
-            if not re.fullmatch(r"[a-z0-9_]+:[a-z0-9_]+", scope):
+            if not re.fullmatch(r"[a-z0-9_]+:[a-z0-9_.]+", scope):
                 raise ValueError(f"Некорректное право Яндекса: {scope!r} (ожидается вида tracker:read)")
             if scope in ("login:email", "login:info"):
                 raise ValueError(f"{scope} запрашивается всегда, указывать не нужно")
@@ -202,6 +222,25 @@ class Settings(BaseSettings):
                 raise ValueError("tracker_auth_mode=user требует tracker:read или tracker:write в yandex_extra_scopes")
             if not self.tracker_org_id:
                 raise ValueError("tracker_auth_mode=user требует tracker_org_id")
+        scopes = set(self.yandex_extra_scopes.split())
+        for service in self.yandex360_set:
+            if service not in YANDEX360_SCOPES:
+                raise ValueError(f"yandex360_services: неизвестный сервис {service!r} (доступны: disk, mail)")
+            if self.token_encryption_keys is None:
+                raise ValueError("yandex360_services требует token_encryption_keys")
+            if YANDEX360_SCOPES[service] not in scopes:
+                raise ValueError(
+                    f"yandex360_services={service} требует {YANDEX360_SCOPES[service]} в yandex_extra_scopes"
+                )
+        if self.diadoc_client_id or self.diadoc_client_secret:
+            if not (self.diadoc_client_id and self.diadoc_client_secret):
+                raise ValueError("Диадок: нужны и diadoc_client_id, и diadoc_client_secret")
+            if self.token_encryption_keys is None:
+                raise ValueError("Диадок требует token_encryption_keys (refresh-токен хранится зашифрованным)")
+            if "offline_access" not in self.diadoc_scope.split():
+                raise ValueError("diadoc_scope должен содержать offline_access")
+        if bool(self.sbis_login) != bool(self.sbis_password):
+            raise ValueError("СБИС: нужны и sbis_login, и sbis_password")
         if not (self.allowed_domains or self.allowed_email_set or self.bootstrap_admins):
             raise ValueError("Не задан ни один разрешённый домен или адрес — войти будет некому")
         return self
@@ -240,6 +279,10 @@ class Settings(BaseSettings):
     @cached_property
     def bootstrap_admins(self) -> frozenset[str]:
         return self._csv(self.bootstrap_admin_emails)
+
+    @cached_property
+    def yandex360_set(self) -> frozenset[str]:
+        return self._csv(self.yandex360_services)
 
     @cached_property
     def trusted_proxies(self) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:

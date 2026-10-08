@@ -166,5 +166,5 @@ def build_ozon(settings: Settings, http: httpx.AsyncClient) -> list[ToolSpec]:
     ]
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     return build_wildberries(settings, http) + build_ozon(settings, http)

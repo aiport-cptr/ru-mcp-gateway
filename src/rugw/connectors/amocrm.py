@@ -52,7 +52,7 @@ def _slim_lead(lead: dict) -> dict:
     }
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     if not (settings.amocrm_base_url and settings.amocrm_token):
         return []
     base = f"{settings.amocrm_base_url}/api/v4"

@@ -28,6 +28,7 @@ from rugw.maintenance import cleanup_loop
 from rugw.migrate import current_revision, head_revision
 from rugw.policy import Level, role_allows
 from rugw.ratelimit import RateLimitMiddleware
+from rugw.service_credentials import build_service_secrets
 from rugw.tools import GatewayServer, ToolSpec, current_actor, register
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ def build_app(
     yandex = YandexOAuth(settings, http)
     provider = GatewayOAuthProvider(settings, db, yandex)
     credentials = build_credentials(settings, db, yandex)
+    secrets = build_service_secrets(settings, db)
     routes = AuthRoutes(settings, db, yandex, provider, auditor, credentials)
 
     server = GatewayServer(
@@ -90,7 +92,7 @@ def build_app(
     register(server, ToolSpec("gateway_whoami", Level.READ, gateway_whoami, gateway_whoami.__doc__), settings, auditor)
 
     # ---- коннекторы
-    specs = build_all(settings, http, credentials) + list(extra_tools or [])
+    specs = build_all(settings, http, credentials, secrets) + list(extra_tools or [])
     for spec in specs:
         register(server, spec, settings, auditor)
     log.info("connectors: %d tools enabled: %s", len(specs), ", ".join(s.name for s in specs) or "—")
@@ -141,4 +143,5 @@ def build_app(
     app.state.server = server
     app.state.auditor = auditor
     app.state.credentials = credentials
+    app.state.secrets = secrets
     return app

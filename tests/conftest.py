@@ -284,8 +284,10 @@ async def as_user():
 
     tokens = []
 
-    def apply(role: str, *rules: tuple[str, str, str], user_id: int | None = None) -> None:
-        perms = Permissions(role=role, rules=tuple(_Rule(c, r, Level(lv)) for c, r, lv in rules), user_id=user_id)
+    def apply(role: str, *rules: tuple[str, str, str], user_id: int | None = None, email: str | None = None) -> None:
+        perms = Permissions(
+            role=role, rules=tuple(_Rule(c, r, Level(lv)) for c, r, lv in rules), user_id=user_id, email=email
+        )
         tokens.append(set_current(perms))
 
     yield apply

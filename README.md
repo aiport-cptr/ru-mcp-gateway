@@ -15,7 +15,7 @@
 - **Секреты коннекторов** остаются на сервере и не попадают ни к модели, ни к клиенту.
 - **Авторизацию нельзя выключить.** Небезопасная конфигурация не даёт процессу стартовать.
 
-Статус: **0.4**, не прошёл внешний аудит безопасности. Не подключайте рабочие
+Статус: **0.4.1**, не прошёл внешний аудит безопасности. Не подключайте рабочие
 системы с правами на запись, пока не прочитаны [SECURITY.md](SECURITY.md) и не проведена проверка.
 
 ## Коннекторы
@@ -34,6 +34,10 @@
 | Контур.Фокус | `focus_lookup` | read |
 | Wildberries | `wb_stocks`, `wb_orders`, `wb_sales` | read |
 | Ozon | `ozon_products`, `ozon_stocks`, `ozon_fbs_postings` | read |
+| Диадок | `diadoc_boxes`, `diadoc_documents` | read |
+| СБИС | `sbis_documents` | read |
+| Яндекс Диск (от имени сотрудника) | `disk_list`, `disk_recent`, `disk_read_text` | read |
+| Яндекс Почта (от имени сотрудника) | `mail_list`, `mail_read` | read |
 
 Коннектор включается, только если в `.env` заданы его учётные данные.
 Пользователь видит в списке только инструменты, разрешённые его роли и правам на ресурсы.
@@ -97,6 +101,9 @@ rugw grants list                             # права на ресурсы
 rugw grants add user:ivan@company.ru tracker SUP write
 rugw grants add role:member bitrix24 'deal:0' write   # основная воронка сделок
 rugw grants remove 7
+rugw groups add sales ivan@company.ru        # группы: права на group:sales
+rugw grants add group:sales amocrm 'lead:*' write
+rugw diadoc login                            # вход администратора в Диадок (один раз)
 
 rugw migrate --status                        # версия схемы базы
 rugw cleanup                                 # очистка вручную (фоновая идёт раз в час)

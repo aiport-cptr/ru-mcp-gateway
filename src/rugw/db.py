@@ -115,6 +115,27 @@ class ResourceGrant(Base):
     created_at: Mapped[float] = mapped_column(Float, default=now)
 
 
+class GroupMember(Base):
+    """Участник группы. По email: человек может ещё ни разу не входить в шлюз."""
+
+    __tablename__ = "group_members"
+
+    group: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), primary_key=True, index=True)
+    created_at: Mapped[float] = mapped_column(Float, default=now)
+
+
+class ServiceCredential(Base):
+    """Токены служебных интеграций (например, Диадок): только зашифрованные, с поколением для CAS."""
+
+    __tablename__ = "service_credentials"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    secret_enc: Mapped[str] = mapped_column(Text)
+    generation: Mapped[int] = mapped_column(Integer, default=1, server_default="0")
+    updated_at: Mapped[float] = mapped_column(Float, default=now)
+
+
 class UserCredential(Base):
     """Токены внешнего провайдера (Яндекс) пользователя. Хранятся только зашифрованными."""
 

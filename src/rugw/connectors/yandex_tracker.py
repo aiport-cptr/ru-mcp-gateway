@@ -70,7 +70,9 @@ def hide_foreign_issues(value: Any, perms, depth: int = 0) -> Any:
     return {k: hide_foreign_issues(v, perms, depth + 1) for k, v in value.items()}
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: YandexCredentials | None = None) -> list[ToolSpec]:
+def build(
+    settings: Settings, http: httpx.AsyncClient, credentials: YandexCredentials | None = None, secrets: Any = None
+) -> list[ToolSpec]:
     user_mode = settings.tracker_auth_mode == "user"
     if not settings.tracker_org_id:
         return []

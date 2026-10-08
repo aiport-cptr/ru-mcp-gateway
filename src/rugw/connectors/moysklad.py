@@ -67,7 +67,7 @@ def _slim(row: Any) -> Any:
     return out
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     if not settings.moysklad_token:
         return []
     base = settings.moysklad_api_base.rstrip("/")

@@ -170,13 +170,18 @@ class YandexCredentials:
 
 
 async def rotate_all(db: Database, cipher: TokenCipher) -> int:
-    """Перешифровать все сохранённые токены первым ключом. Возвращает число записей."""
+    """Перешифровать первым ключом все токены: сотрудников и служебных интеграций. Возвращает число записей."""
+    from rugw.db import ServiceCredential
+
     n = 0
     async with db.session() as s:
         for row in (await s.execute(select(UserCredential))).scalars():
             row.access_token_enc = cipher.rotate(row.access_token_enc)
             if row.refresh_token_enc:
                 row.refresh_token_enc = cipher.rotate(row.refresh_token_enc)
+            n += 1
+        for srow in (await s.execute(select(ServiceCredential))).scalars():
+            srow.secret_enc = cipher.rotate(srow.secret_enc)
             n += 1
     return n
 

@@ -83,7 +83,8 @@ def test_may_have_prefix(rules, expected):
         ("role:admin", "tracker", "*", "read"),  # admin и так всё может
         ("role:boss", "tracker", "*", "read"),
         ("user:not-an-email", "tracker", "*", "read"),
-        ("group:x", "tracker", "*", "read"),
+        ("group:bad name!", "tracker", "*", "read"),  # группы есть с 0.4.1, но имя проверяется
+        ("team:x", "tracker", "*", "read"),
         ("role:member", "jira", "*", "read"),
         ("role:member", "tracker", "SUP ?", "read"),
         ("role:member", "tracker", "[A-Z]*", "read"),  # только *, без классов fnmatch

@@ -19,6 +19,7 @@ MCP-клиент ──HTTPS──▶ Caddy ──127.0.0.1:8000──▶ rugw (
 | `policy.py` | Допуск по почте, роли и уровни инструментов |
 | `access.py` | Права на ресурсы коннекторов: загрузка, проверка, права текущего вызова |
 | `credentials.py` | Шифрованное хранилище токенов Яндекса сотрудников, обновление, ротация ключей |
+| `service_credentials.py` | Шифрованное хранилище токенов служебных интеграций (Диадок) с CAS |
 | `tools.py` | `GatewayServer` (фильтр `tools/list`) и обёртка `guarded` (права, аудит, номер запроса) |
 | `errors.py` | Стабильные коды ошибок и номер запроса (`rq-…`) |
 | `connectors/` | Коннекторы; каждый возвращает список `ToolSpec` |
@@ -26,7 +27,7 @@ MCP-клиент ──HTTPS──▶ Caddy ──127.0.0.1:8000──▶ rugw (
 | `maintenance.py` | Очистка истёкших записей и старого аудита |
 | `migrate.py`, `migrations/` | Миграции схемы базы (Alembic) |
 | `app.py` | Сборка приложения; при старте проверяет версию схемы и запускает фоновую очистку |
-| `__main__.py` | `serve`, `migrate`, `cleanup`, `users`, `audit`, `grants`, `credentials` |
+| `__main__.py` | `serve`, `migrate`, `cleanup`, `users`, `audit`, `grants`, `groups`, `credentials`, `diadoc` |
 
 ## Поток входа
 
@@ -43,7 +44,7 @@ MCP-клиент ──HTTPS──▶ Caddy ──127.0.0.1:8000──▶ rugw (
 
 ## Добавить коннектор
 
-1. `src/rugw/connectors/<имя>.py` с функцией `build(settings, http, credentials) -> list[ToolSpec]`;
+1. `src/rugw/connectors/<имя>.py` с функцией `build(settings, http, credentials, secrets) -> list[ToolSpec]`;
    возвращать `[]`, если не заданы учётные данные.
 2. Для каждого инструмента — честный уровень: `READ`, если ничего не меняет; иначе `WRITE`;
    обязательно `connector=`, и имя коннектора — в `access.CONNECTORS` (иначе шлюз не стартует).

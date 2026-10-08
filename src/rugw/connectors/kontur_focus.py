@@ -55,7 +55,7 @@ def parse_ids(value: str) -> tuple[list[str], list[str]]:
     return inns, ogrns
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     if not settings.focus_key:
         return []
     base = settings.focus_api_base.rstrip("/")

@@ -28,7 +28,7 @@ ENTITY = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_]{0,200}$"
 FIELD = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9_/]{0,200}$")
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     if not (settings.onec_odata_url and settings.onec_username and settings.onec_password):
         return []
     base = settings.onec_odata_url.rstrip("/")

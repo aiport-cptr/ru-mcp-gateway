@@ -12,7 +12,10 @@
   python -m rugw grants list [--subject role:member|user:email]
   python -m rugw grants add <subject> <connector> <resource> <read|write>
   python -m rugw grants remove <id>
+  python -m rugw groups list [group]
+  python -m rugw groups add <group> <email> | remove <group> <email>
   python -m rugw credentials rotate
+  python -m rugw diadoc login | logout
 
 Управление — только из консоли сервера: у админки нет сетевой поверхности атаки.
 """
@@ -35,9 +38,9 @@ from pydantic import ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
-from rugw.access import normalize_subject, validate_grant
+from rugw.access import normalize_email, normalize_group, normalize_subject, validate_grant
 from rugw.config import ROLES, Settings
-from rugw.db import AuditEvent, Database, Grant, ResourceGrant, User, UserCredential
+from rugw.db import AuditEvent, Database, Grant, GroupMember, ResourceGrant, User, UserCredential
 from rugw.maintenance import cleanup
 from rugw.migrate import current_revision, head_revision, upgrade
 
@@ -216,6 +219,37 @@ async def _grants(db: Database, args: argparse.Namespace, out: TextIO) -> int:
     raise AssertionError(args.action)
 
 
+async def _groups(db: Database, args: argparse.Namespace, out: TextIO) -> int:
+    try:
+        group = normalize_group(args.group) if getattr(args, "group", None) else None
+        email = normalize_email(args.email) if getattr(args, "email", None) else None
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    async with db.session() as s:
+        if args.action == "list":
+            q = select(GroupMember).order_by(GroupMember.group, GroupMember.email)
+            if group:
+                q = q.where(GroupMember.group == group)
+            for m in (await s.execute(q)).scalars():
+                print(f"{m.group}\t{m.email}", file=out)
+            return 0
+        if args.action == "add":
+            if await s.get(GroupMember, (group, email)) is None:
+                s.add(GroupMember(group=group, email=email))
+            print(f"OK: {email} в группе {group}", file=out)
+            return 0
+        if args.action == "remove":
+            row = await s.get(GroupMember, (group, email))
+            if row is None:
+                print("Такого участника нет", file=sys.stderr)
+                return 1
+            await s.delete(row)
+            print(f"OK: {email} удалён из группы {group}", file=out)
+            return 0
+    raise AssertionError(args.action)
+
+
 async def _credentials(db: Database, settings: Settings, args: argparse.Namespace, out: TextIO) -> int:
     from rugw.credentials import TokenCipher, rotate_all
 
@@ -224,6 +258,42 @@ async def _credentials(db: Database, settings: Settings, args: argparse.Namespac
         return 2
     n = await rotate_all(db, TokenCipher(settings.token_encryption_keys))
     print(f"OK: перешифровано {n} записей первым ключом; старые ключи можно убрать из настроек", file=out)
+    return 0
+
+
+async def _diadoc(db: Database, settings: Settings, args: argparse.Namespace, out: TextIO) -> int:
+    import httpx
+
+    from rugw.connectors.diadoc import PROVIDER, DiadocTokens
+    from rugw.service_credentials import build_service_secrets
+    from rugw.tools import ConnectorError
+
+    secrets = build_service_secrets(settings, db)
+    if not (settings.diadoc_client_id and settings.diadoc_client_secret) or secrets is None:
+        print(
+            "Диадок не настроен: нужны RUGW_DIADOC_CLIENT_ID, RUGW_DIADOC_CLIENT_SECRET и ключи шифрования",
+            file=sys.stderr,
+        )
+        return 2
+    if args.action == "logout":
+        await secrets.delete(PROVIDER)
+        print("OK: сохранённый вход в Диадок удалён", file=out)
+        return 0
+
+    def show(url: str | None, code: str | None) -> None:
+        print("Откройте в браузере и войдите учётной записью Контура, у которой есть доступ к ящикам:", file=out)
+        print(f"  {url}", file=out)
+        if code:
+            print(f"Код подтверждения: {code}", file=out)
+        print("Жду подтверждения…", file=out, flush=True)
+
+    async with httpx.AsyncClient() as http:
+        try:
+            await DiadocTokens(settings, http, secrets).device_login(show)
+        except ConnectorError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+    print("OK: вход в Диадок сохранён (refresh-токен зашифрован в базе)", file=out)
     return 0
 
 
@@ -251,6 +321,10 @@ async def _run(settings: Settings, args: argparse.Namespace, out: TextIO) -> int
             return await _audit(db, args, out)
         if args.cmd == "grants":
             return await _grants(db, args, out)
+        if args.cmd == "diadoc":
+            return await _diadoc(db, settings, args, out)
+        if args.cmd == "groups":
+            return await _groups(db, args, out)
         if args.cmd == "credentials":
             return await _credentials(db, settings, args, out)
         raise AssertionError(args.cmd)
@@ -313,11 +387,24 @@ def build_parser() -> argparse.ArgumentParser:
     gl = gr_sub.add_parser("list")
     gl.add_argument("--subject", help="role:member или user:ivan@company.ru")
     ga = gr_sub.add_parser("add")
-    ga.add_argument("subject", help="role:readonly | role:member | user:<email>")
+    ga.add_argument("subject", help="role:readonly | role:member | group:<группа> | user:<email>")
     ga.add_argument("connector", help="tracker | bitrix24 | onec | amocrm | moysklad | focus | wildberries | ozon | *")
     ga.add_argument("resource", help="очередь Трекера, deal:<воронка>/lead/contact/company, набор 1С; * — шаблон")
     ga.add_argument("level", choices=["read", "write"])
     gr_sub.add_parser("remove").add_argument("id", type=int)
+
+    dd = sub.add_parser("diadoc", help="вход администратора в Диадок (Device Authorization Flow)")
+    dd_sub = dd.add_subparsers(dest="action", required=True)
+    dd_sub.add_parser("login")
+    dd_sub.add_parser("logout")
+
+    gp = sub.add_parser("groups", help="группы пользователей для прав (group:<имя> в grants)")
+    gp_sub = gp.add_subparsers(dest="action", required=True)
+    gp_sub.add_parser("list").add_argument("group", nargs="?")
+    for a in ("add", "remove"):
+        x = gp_sub.add_parser(a)
+        x.add_argument("group")
+        x.add_argument("email")
 
     cr = sub.add_parser("credentials", help="сохранённые токены Яндекса сотрудников")
     cr_sub = cr.add_subparsers(dest="action", required=True)

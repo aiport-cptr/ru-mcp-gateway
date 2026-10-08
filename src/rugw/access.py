@@ -11,19 +11,32 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from rugw.config import ROLES
-from rugw.db import Database, ResourceGrant
+from rugw.db import Database, GroupMember, ResourceGrant
 from rugw.policy import Level, role_allows
 
-CONNECTORS = ("tracker", "bitrix24", "onec", "amocrm", "moysklad", "focus", "wildberries", "ozon")
+CONNECTORS = (
+    "tracker",
+    "bitrix24",
+    "onec",
+    "amocrm",
+    "moysklad",
+    "focus",
+    "wildberries",
+    "ozon",
+    "diadoc",
+    "sbis",
+    "yandex360",
+)
 GRANT_LEVELS = (Level.READ, Level.WRITE)
 _RANK = {Level.READ: 1, Level.WRITE: 2}
 
 # Шаблоны ресурса: буквы, цифры, _ : - и звёздочка. Без ?, [ ], пробелов — fnmatch видит только *.
 _RESOURCE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9_:*-]{1,200}$")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_GROUP = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class AccessDenied(Exception):  # noqa: N818 — так понятнее в коде коннекторов
@@ -42,7 +55,23 @@ def normalize_subject(subject: str) -> str:
         if not _EMAIL.match(value):
             raise ValueError("Ожидается user:<email>")
         return f"user:{value}"
-    raise ValueError("Субъект: role:<роль> или user:<email>")
+    if kind == "group":
+        return f"group:{normalize_group(value)}"
+    raise ValueError("Субъект: role:<роль>, group:<группа> или user:<email>")
+
+
+def normalize_group(name: str) -> str:
+    name = name.strip().lower()
+    if not _GROUP.match(name):
+        raise ValueError("Группа: латиница, цифры, _ и -, до 64 символов (например sales или finance-team)")
+    return name
+
+
+def normalize_email(email: str) -> str:
+    email = email.strip().lower()
+    if not _EMAIL.match(email):
+        raise ValueError("Некорректный email")
+    return email
 
 
 def validate_grant(subject: str, connector: str, resource: str, level: str) -> tuple[str, str, str, str]:
@@ -76,6 +105,7 @@ class Permissions:
     role: str
     rules: tuple[_Rule, ...]
     user_id: int | None = None  # кто вызывает: нужно коннекторам с доступом от имени пользователя
+    email: str | None = None  # для входа от имени пользователя (например, IMAP Яндекс Почты)
 
     @property
     def is_admin(self) -> bool:
@@ -136,17 +166,14 @@ class Permissions:
 
 async def load_permissions(db: Database, email: str, role: str, user_id: int | None = None) -> Permissions:
     if role == "admin":
-        return Permissions(role=role, rules=(), user_id=user_id)
+        return Permissions(role=role, rules=(), user_id=user_id, email=email.lower())
+    email = email.lower()
     async with db.session() as s:
-        rows = (
-            await s.execute(
-                select(ResourceGrant).where(
-                    or_(ResourceGrant.subject == f"user:{email.lower()}", ResourceGrant.subject == f"role:{role}")
-                )
-            )
-        ).scalars()
+        groups = (await s.execute(select(GroupMember.group).where(GroupMember.email == email))).scalars().all()
+        subjects = [f"user:{email}", f"role:{role}", *(f"group:{g}" for g in groups)]
+        rows = (await s.execute(select(ResourceGrant).where(ResourceGrant.subject.in_(subjects)))).scalars()
         rules = tuple(_Rule(r.connector, r.resource, Level(r.level)) for r in rows if r.level in GRANT_LEVELS)
-    return Permissions(role=role, rules=rules, user_id=user_id)
+    return Permissions(role=role, rules=rules, user_id=user_id, email=email)
 
 
 # Права текущего вызова. Устанавливает обёртка guarded (tools.py) перед вызовом инструмента.

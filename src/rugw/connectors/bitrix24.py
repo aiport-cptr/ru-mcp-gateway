@@ -36,7 +36,7 @@ def deal_resource(record: Any) -> str | None:
     return f"deal:{cat}" if cat is not None and _CATEGORY.match(cat) else None
 
 
-def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None) -> list[ToolSpec]:
+def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, secrets: Any = None) -> list[ToolSpec]:
     if not settings.bitrix24_webhook_url:
         return []
 

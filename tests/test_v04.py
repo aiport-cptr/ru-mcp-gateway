@@ -141,7 +141,7 @@ def test_connector_must_be_declared(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(
-        connectors, "BUILDERS", (lambda s, h, c: [ToolSpec("x", Level.READ, f, "x", connector="jira")],)
+        connectors, "BUILDERS", (lambda s, h, c, sec: [ToolSpec("x", Level.READ, f, "x", connector="jira")],)
     )
     with pytest.raises(RuntimeError, match="jira"):
         build_all(make_settings(tmp_path), httpx.AsyncClient())

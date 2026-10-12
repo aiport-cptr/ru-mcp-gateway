@@ -118,8 +118,8 @@ async def test_service_secrets_encrypted_cas_and_rotation(tmp_path):
     assert "refresh-1" not in row.secret_enc
     value, gen = await store.get("diadoc")
     assert value == "refresh-1"
-    assert await store.cas("diadoc", gen, "refresh-2") is True
-    assert await store.cas("diadoc", gen, "refresh-stale") is False  # устаревшее поколение
+    assert await store.cas("diadoc", gen, "refresh-2") not in (None, gen)  # новая версия
+    assert await store.cas("diadoc", gen, "refresh-stale") is None  # устаревшая версия
     assert (await store.get("diadoc"))[0] == "refresh-2"
     new_key = Fernet.generate_key().decode()
     assert await rotate_all(db, TokenCipher(SecretStr(f"{new_key},{KEY}"))) == 1
@@ -202,12 +202,16 @@ async def test_diadoc_documents_body_and_box_grant(tmp_path, as_user):
             assert json.loads(req.content) == {
                 "DocumentCategory": "Incoming",
                 "Count": 100,
-                "FromDocumentDate": "2026-10-01",
+                "FromDocumentDate": "01.10.2026",  # ДД.ММ.ГГГГ по контракту GetDocumentsV4Request
             }
             with pytest.raises(AccessDenied):
                 await t["diadoc_documents"].fn(box_id="box-2@diadoc.ru")
             assert docs.call_count == 1
-            for bad in ({"box_id": "../x"}, {"box_id": "box-1@diadoc.ru", "from_date": "01.10.2026"}):
+            for bad in (
+                {"box_id": "../x"},
+                {"box_id": "box-1@diadoc.ru", "from_date": "01.10.2026"},
+                {"box_id": "box-1@diadoc.ru", "to_date": "2026-02-30"},  # несуществующая дата
+            ):
                 with pytest.raises(ConnectorError):
                     await t["diadoc_documents"].fn(**bad)
         await db.dispose()
@@ -229,7 +233,7 @@ async def test_diadoc_relogin_required(tmp_path, as_admin):
 
 
 async def test_diadoc_concurrent_rotation_retries_with_new_token(tmp_path, as_admin):
-    """Другой процесс обменял refresh раньше нас: наш старый отвергнут, но поколение сменилось — повторяем."""
+    """Другой процесс обменял refresh раньше нас: наш старый отвергнут, но версия сменилась — повторяем."""
     async with httpx.AsyncClient() as http:
         db, store, t = await _diadoc(tmp_path, http)
         await store.put("diadoc", "rt-old")
@@ -247,9 +251,10 @@ async def test_diadoc_concurrent_rotation_retries_with_new_token(tmp_path, as_ad
 
         async def get_and_race(provider):
             calls["n"] += 1
-            if calls["n"] == 2:  # между нашим чтением и отказом другой процесс сохранил новый refresh
+            result = await orig_get(provider)
+            if calls["n"] == 1:  # сразу после нашего чтения другой процесс сохранил новый refresh
                 await store.put("diadoc", "rt-new")
-            return await orig_get(provider)
+            return result
 
         store.get = get_and_race
         with respx.mock:

@@ -8,9 +8,11 @@
 Согласованность (в том числе между несколькими процессами шлюза):
 - Новый вход (save) пишет токены, только если пользователь не заблокирован, держа блокировку
   строки пользователя (SELECT … FOR UPDATE) — так он не пересекается с `users disable`.
-- Обновление по refresh пишет результат условным UPDATE по поколению записи (CAS) и никогда
-  не создаёт запись заново. Если запись удалили (блокировка) или заменили (новый вход) —
-  результат обновления отбрасывается, берётся актуальное состояние.
+- Обновление по refresh пишет результат условным UPDATE по версии записи (CAS) и никогда
+  не создаёт запись заново. Версия — случайный uuid4, новый при каждой записи: после удаления
+  и нового входа совпасть со старой она не может (ABA, проверка 0.4.1).
+  Если запись удалили (блокировка) или заменили (новый вход) — результат обновления
+  отбрасывается, берётся актуальное состояние.
 - Блокировка asyncio.Lock на пользователя — только чтобы в одном процессе не ходить в Яндекс
   дважды; корректность от неё не зависит.
 """
@@ -20,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections import defaultdict
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
@@ -39,6 +42,11 @@ REFRESH_MARGIN_SECONDS = 300  # обновляем заранее, чтобы т
 
 class CredentialsUnavailable(Exception):  # noqa: N818
     """Нет пригодного токена пользователя — нужно войти в шлюз заново."""
+
+
+def new_version() -> str:
+    """Неповторяющаяся версия записи токенов для CAS."""
+    return uuid.uuid4().hex
 
 
 class TokenCipher:
@@ -73,6 +81,7 @@ class YandexCredentials:
             "expires_at": time.time() + tokens.expires_in if tokens.expires_in else None,
             "scopes": self.scopes,
             "updated_at": time.time(),
+            "version": new_version(),
         }
         # Яндекс может не прислать новый refresh при обновлении — тогда прежний остаётся.
         if tokens.refresh_token:
@@ -107,17 +116,19 @@ class YandexCredentials:
                     raise
         return False  # недостижимо; для анализатора
 
-    async def _save_refreshed(self, user_id: int, generation: int, tokens: YandexTokens) -> bool:
+    async def _save_refreshed(self, user_id: int, version: str, tokens: YandexTokens) -> bool:
         """CAS: записать результат обновления, только если запись не менялась с момента чтения."""
+        if not version:
+            return False  # запись без версии (не должно быть после миграции 0008) — не рискуем
         async with self.db.session() as s:
             res = await s.execute(
                 update(UserCredential)
                 .where(
                     UserCredential.user_id == user_id,
                     UserCredential.provider == PROVIDER_YANDEX,
-                    UserCredential.generation == generation,
+                    UserCredential.version == version,
                 )
-                .values(**self._encrypted(tokens), generation=generation + 1)
+                .values(**self._encrypted(tokens), generation=UserCredential.generation + 1)
             )
             return res.rowcount == 1
 
@@ -125,8 +136,8 @@ class YandexCredentials:
         async with self.db.session() as s:
             await s.execute(delete(UserCredential).where(UserCredential.user_id == user_id))
 
-    async def _read(self, user_id: int) -> tuple[str, str | None, float | None, int]:
-        """(access, refresh, expires_at, generation) или CredentialsUnavailable."""
+    async def _read(self, user_id: int) -> tuple[str, str | None, float | None, str]:
+        """(access, refresh, expires_at, version) или CredentialsUnavailable."""
         async with self.db.session() as s:
             row = await s.get(UserCredential, (user_id, PROVIDER_YANDEX))
             if row is None:
@@ -140,7 +151,7 @@ class YandexCredentials:
                 # Ключ шифрования сменили без перешифровки — сохранённые токены не прочитать.
                 log.error("cannot decrypt credentials of user_id=%s: unknown key", user_id)
                 raise CredentialsUnavailable("сохранённый доступ не читается") from exc
-            return access, refresh, row.expires_at, row.generation
+            return access, refresh, row.expires_at, row.version
 
     @staticmethod
     def _fresh(expires_at: float | None) -> bool:
@@ -148,7 +159,7 @@ class YandexCredentials:
 
     async def access_token(self, user_id: int) -> str:
         async with self._locks[user_id]:
-            access, refresh, expires_at, generation = await self._read(user_id)
+            access, refresh, expires_at, version = await self._read(user_id)
             if self._fresh(expires_at):
                 return access
             if refresh is None:
@@ -158,7 +169,7 @@ class YandexCredentials:
             except YandexAuthError as exc:
                 log.warning("yandex token refresh failed for user_id=%s: %s", user_id, exc)
                 raise CredentialsUnavailable("не удалось обновить доступ") from exc
-            if await self._save_refreshed(user_id, generation, tokens):
+            if await self._save_refreshed(user_id, version, tokens):
                 return tokens.access_token
             # Пока ждали Яндекс, запись удалили (блокировка) или заменили (новый вход):
             # результат обновления устарел — не сохраняем и не используем его.

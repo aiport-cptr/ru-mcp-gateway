@@ -14,6 +14,7 @@ GetMyOrganizations вызывается с autoRegister=false: иначе Диа
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import re
 import time
@@ -36,7 +37,6 @@ PROVIDER = "diadoc"
 BOX_ID = re.compile(r"^[A-Za-z0-9@.\-]{1,64}$")
 CATEGORY = re.compile(r"^[A-Za-z.]{1,40}$")
 INDEX_KEY = re.compile(r"^[A-Za-z0-9+/=_\-]{1,200}$")
-DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DOC_FIELDS = (
     "MessageId",
     "EntityId",
@@ -54,7 +54,16 @@ RELOGIN = "Диадок: нужен повторный вход админист
 
 
 class DiadocTokens:
-    """Access-токен в памяти + ротация refresh в базе."""
+    """Access-токен в памяти + ротация refresh в базе.
+
+    Кэш access привязан к версии служебной записи: перед каждым использованием версия
+    перечитывается из базы (дёшево, без расшифровки). Если запись удалили (`rugw diadoc logout`
+    в другом процессе) — RELOGIN_REQUIRED; если заменили (новый вход) — кэш сбрасывается и
+    access получается заново по новому refresh. Ответ на обмен refresh используется, только
+    если запись за это время не менялась: при конфликте он отбрасывается (проверка 0.4.1).
+    """
+
+    ATTEMPTS = 3
 
     def __init__(self, settings: Settings, http: httpx.AsyncClient, secrets: ServiceSecrets) -> None:
         self.s = settings
@@ -62,7 +71,11 @@ class DiadocTokens:
         self.secrets = secrets
         self._access: str | None = None
         self._expires = 0.0
+        self._version: str | None = None  # версия записи, по которой получен закэшированный access
         self._lock = asyncio.Lock()
+
+    def _forget(self) -> None:
+        self._access, self._expires, self._version = None, 0.0, None
 
     async def _token_request(self, form: dict[str, str]) -> dict:
         try:
@@ -90,11 +103,16 @@ class DiadocTokens:
 
     async def access_token(self) -> str:
         async with self._lock:
-            if self._access and self._expires - 120 > time.time():
+            current = await self.secrets.version(PROVIDER)
+            if current is None:  # logout — забываем всё, что было получено по прежнему входу
+                self._forget()
+                raise ConnectorError(RELOGIN, ErrorCode.RELOGIN_REQUIRED)
+            if self._access and self._version == current and self._expires - 120 > time.time():
                 return self._access
-            for _ in range(2):
+            self._forget()
+            for _ in range(self.ATTEMPTS):
                 try:
-                    refresh, generation = await self.secrets.get(PROVIDER)
+                    refresh, version = await self.secrets.get(PROVIDER)
                 except ServiceSecretUnavailable as exc:
                     raise ConnectorError(f"{RELOGIN} ({exc})", ErrorCode.RELOGIN_REQUIRED) from exc
                 try:
@@ -102,17 +120,22 @@ class DiadocTokens:
                 except ConnectorError as exc:
                     if exc.code != ErrorCode.RELOGIN_REQUIRED:
                         raise
-                    # Возможно, другой процесс уже обменял этот refresh: если поколение сменилось — повторяем.
-                    _, current = await self.secrets.get(PROVIDER)
-                    if current != generation:
+                    # Возможно, этот refresh уже обменял другой процесс или администратор вошёл заново.
+                    if await self.secrets.version(PROVIDER) not in (None, version):
                         continue
                     raise
                 new_refresh = data.get("refresh_token")
                 if isinstance(new_refresh, str) and new_refresh and new_refresh != refresh:
-                    if not await self.secrets.cas(PROVIDER, generation, new_refresh):
-                        log.info("diadoc refresh token changed concurrently; keeping the stored one")
-                self._access = data["access_token"]
+                    stored = await self.secrets.cas(PROVIDER, version, new_refresh)
+                else:
+                    # Новый refresh не выдан — всё равно убеждаемся, что запись та же самая.
+                    stored = version if await self.secrets.version(PROVIDER) == version else None
+                if stored is None:
+                    # Запись удалили или заменили, пока шёл обмен: ответ относится к прежнему входу.
+                    log.info("diadoc credentials changed during refresh; response discarded")
+                    continue
                 expires = data.get("expires_in")
+                self._access, self._version = data["access_token"], stored
                 self._expires = time.time() + (
                     int(expires) if isinstance(expires, int | float) and expires > 0 else 600
                 )
@@ -147,7 +170,7 @@ class DiadocTokens:
             body = t.json() if t.content else {}
             if t.status_code == 200 and body.get("refresh_token"):
                 await self.secrets.put(PROVIDER, body["refresh_token"])
-                self._access, self._expires = None, 0.0
+                self._forget()
                 return
             err = body.get("error")
             if err == "slow_down":
@@ -155,6 +178,14 @@ class DiadocTokens:
             elif err != "authorization_pending":
                 raise ConnectorError(f"Диадок: вход отклонён ({safe(err)})", ErrorCode.UPSTREAM_AUTH)
         raise ConnectorError("Диадок: время на подтверждение входа истекло", ErrorCode.UPSTREAM_TIMEOUT)
+
+
+def to_diadoc_date(value: str) -> str:
+    """ГГГГ-ММ-ДД → ДД.ММ.ГГГГ: формат FromDocumentDate/ToDocumentDate по контракту GetDocumentsV4Request."""
+    try:
+        return dt.date.fromisoformat(value.strip()).strftime("%d.%m.%Y")
+    except ValueError as exc:
+        raise ConnectorError("Дата: ГГГГ-ММ-ДД") from exc
 
 
 def safe(value: Any) -> str:
@@ -218,9 +249,7 @@ def build(settings: Settings, http: httpx.AsyncClient, credentials: Any = None, 
         body: dict[str, Any] = {"DocumentCategory": category, "Count": max(1, min(count, 100))}
         for key, value in (("FromDocumentDate", from_date), ("ToDocumentDate", to_date)):
             if value:
-                if not DATE.match(value):
-                    raise ConnectorError("Дата: ГГГГ-ММ-ДД")
-                body[key] = value
+                body[key] = to_diadoc_date(value)
         if after_index_key:
             if not INDEX_KEY.match(after_index_key):
                 raise ConnectorError("Некорректный after_index_key")

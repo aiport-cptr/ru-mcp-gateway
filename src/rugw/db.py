@@ -133,6 +133,9 @@ class ServiceCredential(Base):
     provider: Mapped[str] = mapped_column(String(32), primary_key=True)
     secret_enc: Mapped[str] = mapped_column(Text)
     generation: Mapped[int] = mapped_column(Integer, default=1, server_default="0")
+    # Неповторяющаяся версия записи (uuid4): меняется при каждой записи. CAS сравнивает её,
+    # а не счётчик — счётчик после удаления и нового входа начинается заново (ABA, проверка 0.4.1).
+    version: Mapped[str] = mapped_column(String(32), default="", server_default="")
     updated_at: Mapped[float] = mapped_column(Float, default=now)
 
 
@@ -147,9 +150,12 @@ class UserCredential(Base):
     refresh_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     scopes: Mapped[str] = mapped_column(String(512), default="")
-    # Поколение записи: растёт при каждом сохранении. Обновление по refresh пишет результат,
-    # только если поколение не изменилось с момента чтения (CAS) — см. credentials.py.
+    # Поколение записи: растёт при каждом сохранении (для диагностики).
     generation: Mapped[int] = mapped_column(Integer, default=1, server_default="0")
+    # Неповторяющаяся версия записи (uuid4): обновление по refresh пишет результат, только если
+    # версия не изменилась с момента чтения (CAS) — см. credentials.py. Счётчик для CAS не годится:
+    # после удаления записи и нового входа он начинается заново (ABA, проверка 0.4.1).
+    version: Mapped[str] = mapped_column(String(32), default="", server_default="")
     updated_at: Mapped[float] = mapped_column(Float, default=now)
 
 

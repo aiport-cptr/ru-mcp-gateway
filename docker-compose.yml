@@ -1,4 +1,19 @@
-# Порт шлюза публикуется ТОЛЬКО на 127.0.0.1. Наружу — через HTTPS reverse proxy (deploy/Caddyfile).
+# Установка — INSTALL.md. Настройки — .env (создаёт deploy/install.sh).
+#
+# Порт шлюза публикуется ТОЛЬКО на 127.0.0.1. Наружу — через HTTPS reverse proxy:
+#   - на чистом сервере — встроенный Caddy: docker compose --profile caddy up -d
+#   - если на сервере уже есть nginx/Caddy — добавьте в него поддомен (deploy/install.sh подготовит файл).
+#
+# Имя проекта фиксировано (rugw): контейнеры, сеть и тома не пересекаются с другими проектами
+# на том же сервере. НИКОГДА не запускайте `docker compose down -v` — это удалит базу.
+name: rugw
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,16 +21,20 @@ services:
     environment:
       POSTGRES_DB: rugw
       POSTGRES_USER: rugw
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD в .env (deploy/install.sh)}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rugw -d rugw"]
       interval: 5s
       retries: 20
+    mem_limit: ${RUGW_PG_MEM_LIMIT:-512m}
+    cpus: ${RUGW_PG_CPUS:-1}
+    logging: *logging
 
   gateway:
     build: .
+    image: rugw-gateway:local
     restart: unless-stopped
     env_file: .env
     environment:
@@ -24,11 +43,33 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8000}:8000"
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: ${RUGW_MEM_LIMIT:-512m}
+    cpus: ${RUGW_CPUS:-1}
+    logging: *logging
+
+  # Встроенный HTTPS (Let's Encrypt). Только для сервера, где порты 80 и 443 свободны.
+  caddy:
+    profiles: [caddy]
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    network_mode: host # видит 127.0.0.1:${GATEWAY_HOST_PORT} шлюза
+    environment:
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?задайте GATEWAY_DOMAIN в .env}
+      GATEWAY_HOST_PORT: ${GATEWAY_HOST_PORT:-8000}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [gateway]
+    mem_limit: 256m
+    logging: *logging
 
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

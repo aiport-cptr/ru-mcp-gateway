@@ -15,7 +15,7 @@
 - **Секреты коннекторов** остаются на сервере и не попадают ни к модели, ни к клиенту.
 - **Авторизацию нельзя выключить.** Небезопасная конфигурация не даёт процессу стартовать.
 
-Статус: **0.4.2**, не прошёл внешний аудит безопасности. Не подключайте рабочие
+Статус: **0.4.3**, не прошёл внешний аудит безопасности. Не подключайте рабочие
 системы с правами на запись, пока не прочитаны [SECURITY.md](SECURITY.md) и не проведена проверка.
 
 ## Коннекторы
@@ -44,24 +44,18 @@
 
 ## Установка
 
-Нужны: VM с Ubuntu 24.04, домен с A-записью на неё, Docker, Caddy.
+Пошагово — [INSTALL.md](INSTALL.md); для установки ИИ-помощником — [INSTALL_FOR_AI.md](INSTALL_FOR_AI.md).
+Коротко:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y git docker.io docker-compose-v2 caddy
-sudo git clone https://github.com/aiport-cptr/ru-mcp-gateway.git /opt/rugw
-cd /opt/rugw
-sudo install -m 0600 .env.example .env
-sudo editor .env          # заполнить; секреты не отправлять в чаты
-sudo docker compose up -d --build              # при старте сам применяет миграции базы
-curl -fsS http://127.0.0.1:8000/healthz      # {"ok":true,"auth_enabled":true,...}
+sudo git clone https://github.com/aiport-cptr/ru-mcp-gateway.git /opt/rugw && cd /opt/rugw
+sudo deploy/install.sh --domain mcp.company.ru --admin you@company.ru --allowed-domains company.ru
+sudo deploy/check.sh
 ```
 
-HTTPS: скопируйте `deploy/Caddyfile` в `/etc/caddy/Caddyfile`, замените домен,
-`sudo systemctl reload caddy`. Порт 8000 в облаке **не открывайте** — он слушает только 127.0.0.1.
-
-OAuth-приложение Яндекса (https://oauth.yandex.ru/client/new):
-права «Доступ к адресу электронной почты» и «Доступ к логину, имени и фамилии»,
-Redirect URI — `https://<домен>/auth/yandex/callback`.
+Установщик сам генерирует пароль базы и ключ шифрования, выбирает свободный порт (только
+127.0.0.1) и способ HTTPS: встроенный Caddy на чистом сервере или файл для уже работающего
+nginx/Caddy. Сервер может быть общим с другими сайтами — шлюз от них изолирован.
 
 ## Подключение клиента
 
@@ -76,11 +70,10 @@ claude mcp add --transport http company https://<домен>/mcp
 ## Обновление
 
 ```bash
-cd /opt/rugw && sudo git pull && sudo docker compose up -d --build
+cd /opt/rugw && sudo deploy/update.sh     # копия базы → git pull → пересборка → проверка
 ```
 
-Миграции базы применяются автоматически при старте. Перед обновлением сделайте резервную копию:
-`sudo docker compose exec postgres pg_dump -U rugw rugw > backup.sql`.
+Резервные копии и восстановление — [INSTALL.md](INSTALL.md#резервные-копии).
 
 ## Управление
 

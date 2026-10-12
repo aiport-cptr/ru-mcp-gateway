@@ -1,18 +1,29 @@
-# /etc/caddy/Caddyfile — замените домен. Caddy сам получит сертификат Let's Encrypt.
-mcp.your-company.ru {
-    reverse_proxy 127.0.0.1:8000
+# HTTPS для шлюза. Caddy сам получает сертификат Let's Encrypt (нужны свободные порты 80 и 443
+# и A-запись домена на этот сервер).
+#
+# Встроенный Caddy (docker compose --profile caddy) подставляет значения из .env.
+# Caddy, установленный на сервере, переменных .env не видит: возьмите готовый блок
+# из deploy/generated/ (его пишет deploy/install.sh) или замените значения вручную.
+{$GATEWAY_DOMAIN} {
+	reverse_proxy 127.0.0.1:{$GATEWAY_HOST_PORT:8000}
 
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        -Server
-    }
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
 
-    # Логи без заголовков Authorization и cookies
-    log {
-        output file /var/log/caddy/rugw.log
-        format filter {
-            request>headers>Authorization delete
-            request>headers>Cookie delete
-        }
-    }
+	# Журнал запросов без заголовков Authorization и cookies
+	log {
+		output stdout
+		format filter {
+			fields {
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				request>uri query {
+					delete code
+					delete state
+				}
+			}
+		}
+	}
 }

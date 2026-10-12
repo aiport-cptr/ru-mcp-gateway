@@ -16,6 +16,7 @@
   python -m rugw groups add <group> <email> | remove <group> <email>
   python -m rugw credentials rotate
   python -m rugw diadoc login | logout
+  python -m rugw check
 
 Управление — только из консоли сервера: у админки нет сетевой поверхности атаки.
 """
@@ -300,9 +301,35 @@ async def _diadoc(db: Database, settings: Settings, args: argparse.Namespace, ou
 # ------------------------------------------------------------------ main
 
 
+async def _check(db: Database, settings: Settings, out: TextIO) -> int:
+    """Проверка после установки: настройки, база, включённые коннекторы. Секреты не выводятся."""
+    import httpx
+
+    from rugw.connectors import build_all
+
+    print(f"OK: настройки корректны; адрес {settings.issuer_url}", file=out)
+    try:
+        current = await current_revision(db)
+    except Exception as exc:  # noqa: BLE001 — показываем только тип ошибки: в тексте бывает адрес с паролем
+        print(f"ОШИБКА: база недоступна ({type(exc).__name__})", file=out)
+        return 1
+    head = head_revision()
+    state = "актуальна" if current == head else f"{current or 'пустая'} → {head} (обновится при запуске)"
+    print(f"OK: база доступна; схема {state}", file=out)
+    stub = object()  # коннекторы при сборке не обращаются к хранилищам токенов
+    async with httpx.AsyncClient() as http:
+        specs = build_all(settings, http, stub, stub)
+    connectors = sorted({s.connector for s in specs if s.connector})
+    print(f"Коннекторы: {', '.join(connectors) if connectors else 'ни одного (заполните настройки в .env)'}", file=out)
+    print(f"Инструментов: {len(specs)}", file=out)
+    return 0
+
+
 async def _run(settings: Settings, args: argparse.Namespace, out: TextIO) -> int:
     db = Database(settings.database_url)
     try:
+        if args.cmd == "check":
+            return await _check(db, settings, out)
         if args.cmd == "migrate":
             if args.status:
                 print(f"текущая: {await current_revision(db) or 'нет'}; последняя: {head_revision()}")
@@ -393,6 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     ga.add_argument("level", choices=["read", "write"])
     gr_sub.add_parser("remove").add_argument("id", type=int)
 
+    sub.add_parser("check", help="проверить настройки, базу и включённые коннекторы (без вывода секретов)")
     dd = sub.add_parser("diadoc", help="вход администратора в Диадок (Device Authorization Flow)")
     dd_sub = dd.add_subparsers(dest="action", required=True)
     dd_sub.add_parser("login")

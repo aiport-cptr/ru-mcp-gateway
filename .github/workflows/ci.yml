@@ -42,8 +42,40 @@ jobs:
           RUGW_TEST_PG_URL: postgresql+asyncpg://rugw:rugw@127.0.0.1:5432
         run: uv run pytest -q
 
-  docker:
+  install:
+    # Репетиция установки по INSTALL.md: deploy/install.sh → check.sh → повторный запуск → backup.sh.
+    # Значения OAuth — синтетические; внешний доступ (DNS, сертификат) здесь не проверяется.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t rugw:ci .
+      - name: Shellcheck
+        run: shellcheck -x deploy/*.sh
+      - name: Install — first run stops and asks for the Yandex app
+        run: |
+          set +e
+          sudo deploy/install.sh --domain mcp.rugw-ci.ru --admin admin@rugw-ci.ru --proxy external \
+            --non-interactive 2>&1 | tee first.log
+          test "${PIPESTATUS[0]}" -eq 3
+          grep -q RUGW_YANDEX_CLIENT_SECRET first.log
+          test "$(sudo stat -c %a .env)" = 600
+      - name: Install — second run starts the gateway
+        run: |
+          sudo bash -c 'source deploy/lib.sh && env_set RUGW_YANDEX_CLIENT_ID synthetic-client \
+            && env_set RUGW_YANDEX_CLIENT_SECRET synthetic-secret-value'
+          sudo deploy/install.sh --non-interactive 2>&1 | tee second.log
+      - name: Re-run is idempotent and secrets are never printed
+        run: |
+          pw="$(sudo awk -F= '/^POSTGRES_PASSWORD=/ { print $2 }' .env)"
+          key="$(sudo awk -F= '/^RUGW_TOKEN_ENCRYPTION_KEYS=/ { print substr($0, index($0, "=") + 1) }' .env)"
+          sudo deploy/install.sh --non-interactive 2>&1 | tee third.log
+          test "$pw" = "$(sudo awk -F= '/^POSTGRES_PASSWORD=/ { print $2 }' .env)"
+          for f in first.log second.log third.log; do
+            if grep -qF -e "$pw" -e "$key" -e synthetic-secret-value "$f"; then echo "secret leaked to $f"; exit 1; fi
+          done
+      - name: Backup
+        run: |
+          sudo deploy/backup.sh
+          sudo sh -c 'test -s backups/rugw-*.dump'
+      - name: Logs on failure
+        if: failure()
+        run: sudo docker compose logs --tail 100

@@ -146,3 +146,37 @@ def test_diadoc_date_format(value, expected):
 def test_diadoc_date_rejects(bad):
     with pytest.raises(ConnectorError):
         diadoc.to_diadoc_date(bad)
+
+
+async def test_check_command_reports_without_secrets(tmp_path):
+    import io
+
+    from rugw.__main__ import _check
+    from tests.conftest import make_settings
+
+    settings = make_settings(tmp_path, moysklad_token="synthetic-moysklad-token")
+    db = Database(settings.database_url)
+    out = io.StringIO()
+    assert await _check(db, settings, out) == 0
+    text = out.getvalue()
+    assert "пустая → " in text  # схема ещё не создана — обновится при запуске
+    assert "moysklad" in text and "synthetic-moysklad-token" not in text
+    await upgrade(db)
+    out = io.StringIO()
+    assert await _check(db, settings, out) == 0
+    assert "схема актуальна" in out.getvalue()
+    await db.dispose()
+
+
+async def test_check_command_hides_database_error_details(tmp_path):
+    import io
+
+    from rugw.__main__ import _check
+    from tests.conftest import make_settings
+
+    settings = make_settings(tmp_path)
+    db = Database("postgresql+asyncpg://rugw:synthetic-db-password@127.0.0.1:1/rugw")
+    out = io.StringIO()
+    assert await _check(db, settings, out) == 1
+    assert "база недоступна" in out.getvalue() and "synthetic-db-password" not in out.getvalue()
+    await db.dispose()

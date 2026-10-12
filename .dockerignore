@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+backups/
+deploy/generated/
+.git/
+.venv/
+tests/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.db

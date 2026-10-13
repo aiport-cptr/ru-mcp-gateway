@@ -307,7 +307,6 @@ async def _check(db: Database, settings: Settings, out: TextIO) -> int:
 
     from rugw.connectors import build_all
 
-    logging.getLogger("alembic").setLevel(logging.WARNING)  # служебные строки миграций здесь не нужны
     print(f"OK: настройки корректны; адрес {settings.issuer_url}", file=out)
     try:
         current = await current_revision(db)
@@ -465,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.cmd != "serve":
+        # Служебные строки миграций в выводе консольных команд только мешают
+        logging.getLogger("alembic").setLevel(logging.WARNING)
         if getattr(args, "output", None):
             with open(args.output, "w", encoding="utf-8", newline="") as f:
                 return asyncio.run(_run(settings, args, f))

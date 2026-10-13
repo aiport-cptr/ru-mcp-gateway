@@ -12,6 +12,7 @@ from rugw.connectors import (
     diadoc,
     kontur_focus,
     marketplaces,
+    moedelo,
     moysklad,
     onec_odata,
     sbis,
@@ -31,6 +32,7 @@ BUILDERS = (
     diadoc.build,
     sbis.build,
     yandex360.build,
+    moedelo.build,
 )
 
 

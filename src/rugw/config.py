@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # МойСклад: токен (Настройки → Токены), лучше от отдельного пользователя только на чтение
     moysklad_token: SecretStr | None = None
     moysklad_api_base: str = "https://api.moysklad.ru/api/remap/1.2"
+    # Моё дело: ключ API (заголовок md-api-key)
+    moedelo_api_key: SecretStr | None = None
+    moedelo_api_base: str = "https://restapi.moedelo.org"
 
     # Контур.Фокус: ключ API
     focus_key: SecretStr | None = None

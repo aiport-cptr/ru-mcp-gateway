@@ -29,6 +29,7 @@ CONNECTORS = (
     "diadoc",
     "sbis",
     "yandex360",
+    "moedelo",
 )
 GRANT_LEVELS = (Level.READ, Level.WRITE)
 _RANK = {Level.READ: 1, Level.WRITE: 2}

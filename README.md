@@ -15,7 +15,7 @@
 - **Секреты коннекторов** остаются на сервере и не попадают ни к модели, ни к клиенту.
 - **Авторизацию нельзя выключить.** Небезопасная конфигурация не даёт процессу стартовать.
 
-Статус: **0.4.4**, не прошёл внешний аудит безопасности. Не подключайте рабочие
+Статус: **0.4.5**, не прошёл внешний аудит безопасности. Не подключайте рабочие
 системы с правами на запись, пока не прочитаны [SECURITY.md](SECURITY.md) и не проведена проверка.
 
 ## Коннекторы
@@ -31,6 +31,7 @@
 | amoCRM | `amocrm_leads_list`, `amocrm_lead_get`, `amocrm_contacts_list` | read |
 | | `amocrm_add_note` | write |
 | МойСклад | `moysklad_list`, `moysklad_stock` | read |
+| Моё дело (бухгалтерия) | `moedelo_list`, `moedelo_get`, `moedelo_kontragent_contacts` | read |
 | Контур.Фокус | `focus_lookup` | read |
 | Wildberries | `wb_stocks`, `wb_orders`, `wb_sales` | read |
 | Ozon | `ozon_products`, `ozon_stocks`, `ozon_fbs_postings` | read |
@@ -119,7 +120,8 @@ rugw grants add user:cfo@company.ru onec 'Document_*' read
 Ресурсы: Трекер — ключ очереди; Битрикс24 — `deal:<id воронки>`, `lead`, `contact`, `company`;
 1С — имя набора OData; amoCRM — `lead:<id воронки>`, `contact`, `company`; МойСклад — тип сущности
 и `stock`; Контур.Фокус — метод API; Wildberries — `stocks`/`orders`/`sales`; Ozon —
-`products`/`stocks`/`postings`. Подробно — [docs/design/0.4-connectors.md](docs/design/0.4-connectors.md). `*` — любая последовательность символов. Роль — потолок: `readonly`
+`products`/`stocks`/`postings`; Диадок — BoxId ящика; СБИС — тип документа; Моё дело — вид
+данных (`kontragent`, `contract`, `bill`, `act`, `invoice`, `waybill`, `retailreport`, `good`, `stock`). Подробно — [docs/design/0.4-connectors.md](docs/design/0.4-connectors.md). `*` — любая последовательность символов. Роль — потолок: `readonly`
 не пишет даже с правом `write`. Админ видит всё. Изменения действуют сразу.
 Подробно — [docs/design/0.3-access.md](docs/design/0.3-access.md).
 

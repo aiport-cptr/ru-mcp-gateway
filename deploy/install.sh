@@ -245,7 +245,8 @@ caddy-host)
 	sed -e "s/{\$GATEWAY_DOMAIN}/$DOMAIN/" -e "s/{\$GATEWAY_HOST_PORT:8000}/$PORT/" \
 		-e 's#output stdout#output file /var/log/caddy/rugw.log#' deploy/Caddyfile >"$GEN_DIR/Caddyfile-$DOMAIN"
 	chmod 644 "$GEN_DIR/Caddyfile-$DOMAIN"
-	ok "готов блок для Caddy сервера: deploy/generated/Caddyfile-$DOMAIN — добавьте в /etc/caddy/Caddyfile и: sudo systemctl reload caddy"
+	ok "готов блок для Caddy сервера: deploy/generated/Caddyfile-$DOMAIN"
+	ok "подключить (с копией, проверкой и откатом при ошибке): sudo deploy/apply-caddy.sh"
 	;;
 external)
 	env_set COMPOSE_PROFILES ""

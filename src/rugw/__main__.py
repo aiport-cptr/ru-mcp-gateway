@@ -307,6 +307,7 @@ async def _check(db: Database, settings: Settings, out: TextIO) -> int:
 
     from rugw.connectors import build_all
 
+    logging.getLogger("alembic").setLevel(logging.WARNING)  # служебные строки миграций здесь не нужны
     print(f"OK: настройки корректны; адрес {settings.issuer_url}", file=out)
     try:
         current = await current_revision(db)

@@ -87,8 +87,15 @@ sudo nginx -t && sudo systemctl reload nginx
 `nginx -t` проверяет конфигурацию до применения: если он ругается — не перезагружайте nginx,
 работающие сайты не пострадают.
 
-**Caddy.** Добавьте блок из `deploy/generated/Caddyfile-<домен>` в `/etc/caddy/Caddyfile`,
-затем `sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy`.
+**Caddy.**
+
+```bash
+sudo deploy/apply-caddy.sh
+```
+
+Скрипт делает копию `/etc/caddy/Caddyfile`, дописывает блок шлюза, проверяет настройки
+(`caddy validate`) и только тогда мягко перезагружает Caddy — другие сайты не прерываются.
+Если проверка не прошла, файл возвращается как был.
 
 **Другой прокси** (Traefik, nginx в контейнере, панель хостинга): направьте `https://<домен>`
 на `http://127.0.0.1:<порт>` (порт — `GATEWAY_HOST_PORT` в `.env`). Требования: передавать

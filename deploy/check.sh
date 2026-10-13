@@ -84,8 +84,10 @@ else
 fi
 
 say ""
-if [[ $failed -eq 0 ]]; then
-	say "Всё в порядке. Подключение: claude mcp add --transport http company https://${DOMAIN:-<домен>}/mcp"
+if [[ $failed -eq 0 && $LOCAL_ONLY -eq 1 ]]; then
+	say "На сервере всё в порядке. Осталось открыть доступ снаружи, затем: sudo deploy/check.sh"
+elif [[ $failed -eq 0 ]]; then
+	say "Всё в порядке. Адрес для подключения: https://${DOMAIN:-<домен>}/mcp"
 else
 	say "Есть ошибки (✗) — см. выше."
 fi
